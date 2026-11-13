@@ -12,9 +12,18 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "Edge",
+        "width": 8,
+        "height": 120,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "focus": false,
+        "visibleOnAllWorkspaces": true,
+        "shadow": false
       }
     ],
     "security": {
