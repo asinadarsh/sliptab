@@ -25,24 +25,53 @@
   let focusOnHover = false;
 
   const edge = createEdge({
-    hoverDelay: 600,
-    leaveDelay: 400,
+    hoverDelay: 0,
+    leaveDelay: 150,
     onChange: (m: Mode, reason: Reason) => void changeMode(m, reason),
   });
 
+  // Slide timings, kept in step with the CSS below.
+  const OPEN_MS = 150;
+  const CLOSE_MS = 110;
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, reducedMotion ? 0 : ms));
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  // The panel is always in the page, parked off-screen; opening only flips `shown`, so the slide
+  // starts on the very next frame. On X11 the window never resizes, so the slide does not wait for
+  // Rust either. Elsewhere the window must grow first. A newer mode change cancels an older one.
+  let shown = $state(false);
+  let seq = 0;
+  let fixedWindow = false;
+  // Window changes are queued so a late "collapse" can never land after a newer "expand".
+  let windowQueue: Promise<unknown> = Promise.resolve();
+  const setWindow = (expanded: boolean, focus: boolean) =>
+    (windowQueue = windowQueue.then(() => invoke("set_expanded", { expanded, focus })).catch((e) => log(`${e}`)));
+
   async function changeMode(m: Mode, reason: Reason) {
-    if (m === "collapsed") await flushSave();
-    // Only take keyboard focus when the user asked for the panel on purpose,
-    // except on GNOME, where focus is the only reliable way to know the user moved on.
-    const focus = reason === "hotkey" || reason === "click" || (reason === "hover" && focusOnHover);
-    await invoke("set_expanded", { expanded: m === "expanded", focus });
+    const mine = ++seq;
     mode = m;
     if (m === "expanded") {
-      await refresh();
-      await tick();
+      // Only take keyboard focus when the user asked for the panel on purpose,
+      // except on GNOME, where focus is the only reliable way to know the user moved on.
+      const focus = reason === "hotkey" || reason === "click" || (reason === "hover" && focusOnHover);
+      if (fixedWindow) {
+        shown = true;
+        void setWindow(true, focus);
+      } else {
+        await setWindow(true, focus);
+        await nextFrame();
+        if (mine !== seq) return;
+        shown = true;
+      }
       searchEl?.focus();
+      void refresh();
     } else {
-      editing = null;
+      shown = false;
+      void flushSave();
+      await sleep(CLOSE_MS);
+      if (mine !== seq) return;
+      await setWindow(false, false);
+      if (mine === seq) editing = null;
     }
   }
 
@@ -128,7 +157,10 @@
 
   onMount(() => {
     log("mounted");
-    invoke<boolean>("focus_on_hover").then((v) => (focusOnHover = v));
+    invoke<{ focusOnHover: boolean; fixedWindow: boolean }>("platform").then((p) => {
+      focusOnHover = p.focusOnHover;
+      fixedWindow = p.fixedWindow;
+    });
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
     window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
     // On GNOME (XWayland) WebKitGTK does not always fire mouseleave when the pointer moves onto
@@ -164,11 +196,11 @@
   onmouseleave={() => { log("leave"); edge.pointerLeave(); }}
   onmousemove={() => edge.pointerMove()}
 >
-  {#if mode === "collapsed"}
-    <button class="bar" onclick={() => edge.click()} aria-label="Open notes ({notes.length})">
+    <button class="bar" class:hidden={shown} onclick={() => edge.click()} aria-label="Open notes ({notes.length})">
       {#if notes.length}<span class="count">{notes.length}</span>{/if}
     </button>
-  {:else if editing}
+  <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms">
+  {#if editing}
     <header>
       <button onclick={back} aria-label="Back to notes">←</button>
       <span class="muted grow">{editing.title || "Untitled"}</span>
@@ -208,6 +240,7 @@
       aria-label="Quick note"
     />
   {/if}
+  </div>
 </main>
 
 <style>
@@ -217,7 +250,7 @@
     overflow: hidden;
     font: 14px/1.4 system-ui, sans-serif;
     color-scheme: light dark;
-    background: Canvas;
+    background: transparent;
     color: CanvasText;
   }
   main {
@@ -225,13 +258,49 @@
     display: flex;
     flex-direction: column;
   }
-  main.expanded {
+  .panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
     padding: 10px;
     gap: 8px;
     box-sizing: border-box;
+    background: Canvas;
+    border-radius: 12px 0 0 12px;
+    transform: translateX(100%);
+    opacity: 0.6;
+    will-change: transform;
+    transition:
+      transform var(--close-ms) cubic-bezier(0.4, 0, 1, 1),
+      opacity var(--close-ms) linear;
   }
+  .panel.shown {
+    transform: none;
+    opacity: 1;
+    transition:
+      transform var(--open-ms) cubic-bezier(0.16, 1, 0.3, 1),
+      opacity var(--open-ms) linear;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .panel,
+    .panel.shown {
+      transition: none;
+    }
+  }
+  .bar.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* Matches edge.rs: an 8x120 bar on the right edge, vertically centred. On X11 the window stays
+     panel-sized and only this area takes the pointer; elsewhere the window is the bar itself. */
   .bar {
-    flex: 1;
+    position: fixed;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 8px;
+    height: min(120px, 100vh);
     border: 0;
     padding: 0;
     cursor: pointer;
