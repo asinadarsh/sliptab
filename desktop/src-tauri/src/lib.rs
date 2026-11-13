@@ -1,6 +1,8 @@
 mod edge;
+mod hotkey;
+mod settings;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use notes_core::{Note, Store, Uuid};
@@ -9,6 +11,12 @@ use tauri::{Manager, State, WebviewWindow};
 pub use edge::prefer_xwayland_on_gnome;
 
 struct Notes(Mutex<Store>);
+
+/// Settings plus the directory they are saved in.
+struct AppSettings {
+    dir: PathBuf,
+    current: Mutex<settings::Settings>,
+}
 
 type CmdResult<T> = Result<T, String>;
 
@@ -61,12 +69,33 @@ struct Platform {
     /// X11: the window never resizes (only its input shape changes), so the panel can start sliding
     /// before Rust has answered. Elsewhere the window must grow first.
     fixed_window: bool,
+    os: &'static str,
 }
 
 #[tauri::command]
 fn platform() -> Platform {
     let x11 = cfg!(target_os = "linux") && edge::backend() == "x11";
-    Platform { focus_on_hover: x11 && std::env::var_os("WAYLAND_DISPLAY").is_some(), fixed_window: x11 }
+    Platform {
+        focus_on_hover: x11 && std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        fixed_window: x11,
+        os: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
+    }
+}
+
+#[tauri::command]
+fn get_hotkey(app: tauri::AppHandle) -> hotkey::Status {
+    hotkey::status(&app)
+}
+
+/// Bind a new hotkey and save it. On failure the old hotkey stays bound and saved.
+#[tauri::command]
+fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String) -> CmdResult<hotkey::Status> {
+    let previous = s.current.lock().map_err(|e| e.to_string())?.hotkey.clone();
+    let status = hotkey::apply(&app, &accelerator, Some(&previous))?;
+    let mut current = s.current.lock().map_err(|e| e.to_string())?;
+    current.hotkey = accelerator;
+    settings::save(&s.dir, &current).map_err(|e| format!("Hotkey set, but saving settings failed: {e}"))?;
+    Ok(status)
 }
 
 /// Lets the webview write to the dev console (debug builds only; a no-op in release).
@@ -92,12 +121,20 @@ fn device_id(dir: &Path) -> std::io::Result<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default().manage(hotkey::Hotkey::default());
+    #[cfg(desktop)]
+    let builder = builder.plugin(hotkey::plugin());
+    builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("notes.db"), device_id(&dir)?)?;
             app.manage(Notes(Mutex::new(store)));
+            let loaded = settings::load(&dir);
+            if let Err(e) = hotkey::apply(app.handle(), &loaded.hotkey, None) {
+                eprintln!("hotkey: {e}"); // shown in settings via get_hotkey's error
+            }
+            app.manage(AppSettings { dir: dir.clone(), current: Mutex::new(loaded) });
 
             let window = app.get_webview_window("main").expect("main window is declared in tauri.conf.json");
             let placed = edge::place(&window, false)?;
@@ -143,7 +180,9 @@ pub fn run() {
             note_set_pinned,
             set_expanded,
             debug_log,
-            platform
+            platform,
+            get_hotkey,
+            set_hotkey
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
