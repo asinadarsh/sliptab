@@ -51,6 +51,14 @@ fn set_expanded(window: WebviewWindow, expanded: bool, focus: bool) -> CmdResult
     Ok(())
 }
 
+/// Lets the webview write to the dev console (debug builds only; a no-op in release).
+#[tauri::command]
+fn debug_log(msg: String) {
+    if cfg!(debug_assertions) {
+        eprintln!("[web] {msg}");
+    }
+}
+
 /// A per-install random ID, so sync can tell which device made an edit.
 fn device_id(dir: &Path) -> std::io::Result<String> {
     let path = dir.join("device_id");
@@ -98,7 +106,8 @@ pub fn run() {
             note_create,
             note_update,
             note_set_pinned,
-            set_expanded
+            set_expanded,
+            debug_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

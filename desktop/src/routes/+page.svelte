@@ -1,156 +1,283 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { onMount, tick } from "svelte";
+  import { createEdge, type Mode, type Reason } from "$lib/hover";
 
-  let name = $state("");
-  let greetMsg = $state("");
+  type Note = {
+    id: string;
+    title: string;
+    body: string;
+    pinned: boolean;
+    updated_at: number;
+  };
 
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  let mode: Mode = $state("collapsed");
+  let notes: Note[] = $state([]);
+  let query = $state("");
+  let selected = $state(0);
+  let editing: Note | null = $state(null);
+  let draft = $state("");
+  let quick = $state("");
+  let searchEl: HTMLInputElement | undefined = $state();
+  let editorEl: HTMLTextAreaElement | undefined = $state();
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const edge = createEdge({
+    hoverDelay: 300,
+    leaveDelay: 400,
+    onChange: (m: Mode, reason: Reason) => void changeMode(m, reason),
+  });
+
+  async function changeMode(m: Mode, reason: Reason) {
+    if (m === "collapsed") await flushSave();
+    // Only take keyboard focus when the user asked for the panel on purpose.
+    const focus = reason === "hotkey" || reason === "click";
+    await invoke("set_expanded", { expanded: m === "expanded", focus });
+    mode = m;
+    if (m === "expanded") {
+      await refresh();
+      await tick();
+      searchEl?.focus();
+    } else {
+      editing = null;
+    }
   }
+
+  async function refresh() {
+    notes = query.trim()
+      ? await invoke<Note[]>("notes_search", { query })
+      : await invoke<Note[]>("notes_list");
+    selected = Math.min(selected, Math.max(notes.length - 1, 0));
+  }
+
+  async function open(n: Note) {
+    await flushSave();
+    editing = n;
+    draft = n.body;
+    await tick();
+    editorEl?.focus();
+  }
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 500);
+  }
+
+  async function flushSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    if (editing && draft !== editing.body) {
+      editing = await invoke<Note>("note_update", { id: editing.id, body: draft });
+    }
+  }
+
+  async function addQuick() {
+    const body = quick.trim();
+    if (!body) return;
+    await invoke("note_create", { body });
+    quick = "";
+    await refresh();
+  }
+
+  async function togglePin(n: Note) {
+    await invoke("note_set_pinned", { id: n.id, pinned: !n.pinned });
+    await refresh();
+  }
+
+  async function back() {
+    await flushSave();
+    editing = null;
+    await refresh();
+    await tick();
+    searchEl?.focus();
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (mode !== "expanded") return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (editing) void back();
+      else edge.escape();
+      return;
+    }
+    if (editing || document.activeElement?.id === "quick") return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      selected = Math.min(selected + 1, notes.length - 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      selected = Math.max(selected - 1, 0);
+    } else if (e.key === "Enter" && notes[selected]) {
+      e.preventDefault();
+      void open(notes[selected]);
+    }
+  }
+
+  function ago(ms: number) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 60) return "now";
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h`;
+    return `${Math.floor(s / 86400)}d`;
+  }
+
+  const log = (msg: string) => void invoke("debug_log", { msg });
+
+  onMount(() => {
+    log("mounted");
+    window.addEventListener("error", (e) => log(`error: ${e.message}`));
+    window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
+    void refresh();
+  });
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+<svelte:window onkeydown={onKey} />
 
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
-  </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
-
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<main
+  class:expanded={mode === "expanded"}
+  onmouseenter={() => { log("enter"); edge.pointerEnter(); }}
+  onmouseleave={() => { log("leave"); edge.pointerLeave(); }}
+>
+  {#if mode === "collapsed"}
+    <button class="bar" onclick={() => edge.click()} aria-label="Open notes ({notes.length})">
+      {#if notes.length}<span class="count">{notes.length}</span>{/if}
+    </button>
+  {:else if editing}
+    <header>
+      <button onclick={back} aria-label="Back to notes">←</button>
+      <span class="muted">{editing.title || "Untitled"}</span>
+    </header>
+    <textarea bind:this={editorEl} bind:value={draft} oninput={scheduleSave} spellcheck="true"></textarea>
+  {:else}
+    <input
+      bind:this={searchEl}
+      bind:value={query}
+      oninput={() => { selected = 0; void refresh(); }}
+      placeholder="Search notes"
+      aria-label="Search notes"
+    />
+    <ul>
+      {#each notes as n, i (n.id)}
+        <li class:sel={i === selected}>
+          <button class="note" onclick={() => open(n)} onmouseenter={() => (selected = i)}>
+            <span class="title">{n.title || "Untitled"}</span>
+            <span class="muted">{ago(n.updated_at)}</span>
+          </button>
+          <button class="pin" class:on={n.pinned} onclick={() => togglePin(n)} aria-label={n.pinned ? "Unpin" : "Pin"}>📌</button>
+        </li>
+      {:else}
+        <li class="muted empty">{query ? "No matches" : "No notes yet. Type one below."}</li>
+      {/each}
+    </ul>
+    <input
+      id="quick"
+      bind:value={quick}
+      onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addQuick(); } }}
+      placeholder="Quick note, Enter to save"
+      aria-label="Quick note"
+    />
+  {/if}
 </main>
 
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+  :global(html, body) {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    font: 14px/1.4 system-ui, sans-serif;
+    color-scheme: light dark;
+    background: Canvas;
+    color: CanvasText;
   }
-
-  a:hover {
-    color: #24c8db;
+  main {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
-
+  main.expanded {
+    padding: 10px;
+    gap: 8px;
+    box-sizing: border-box;
+  }
+  .bar {
+    flex: 1;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    background: color-mix(in srgb, CanvasText 25%, Canvas);
+    border-radius: 4px 0 0 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .count {
+    writing-mode: vertical-rl;
+    font-size: 10px;
+  }
   input,
+  textarea {
+    font: inherit;
+    color: inherit;
+    background: color-mix(in srgb, CanvasText 6%, Canvas);
+    border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+    border-radius: 6px;
+    padding: 8px;
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+  }
+  ul {
+    flex: 1;
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  li {
+    display: flex;
+    border-radius: 6px;
+  }
+  li.sel {
+    background: color-mix(in srgb, Highlight 25%, Canvas);
+  }
   button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    cursor: pointer;
   }
-  button:active {
-    background-color: #0f0f0f69;
+  .note {
+    flex: 1;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px;
+    text-align: left;
+    min-width: 0;
   }
-}
-
+  .title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pin {
+    opacity: 0.25;
+  }
+  .pin.on {
+    opacity: 1;
+  }
+  .muted {
+    opacity: 0.6;
+  }
+  .empty {
+    padding: 8px;
+  }
+  header {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
 </style>
