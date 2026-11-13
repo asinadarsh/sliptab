@@ -3,6 +3,9 @@
   import { listen } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
+  import { captureHotkey, formatHotkey } from "$lib/accel";
+
+  type HotkeyStatus = { accelerator: string; bound: string | null; portal: boolean; error: string | null };
 
   type Note = {
     id: string;
@@ -23,6 +26,12 @@
   let editorEl: HTMLTextAreaElement | undefined = $state();
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let focusOnHover = false;
+  let os: "macos" | "windows" | "linux" = $state("linux");
+  let settingsOpen = $state(false);
+  let hotkey: HotkeyStatus | null = $state(null);
+  let capturing = $state(false);
+  let hotkeyMsg = $state("");
+  let quickEl: HTMLInputElement | undefined = $state();
 
   const edge = createEdge({
     hoverDelay: 0,
@@ -63,7 +72,15 @@
         if (mine !== seq) return;
         shown = true;
       }
-      searchEl?.focus();
+      // The hotkey is for capturing a thought: land in Quick note. Hover/click land in search.
+      if (reason === "hotkey") {
+        editing = null;
+        settingsOpen = false;
+        await tick();
+        quickEl?.focus();
+      } else {
+        searchEl?.focus();
+      }
       void refresh();
     } else {
       shown = false;
@@ -71,7 +88,11 @@
       await sleep(CLOSE_MS);
       if (mine !== seq) return;
       await setWindow(false, false);
-      if (mine === seq) editing = null;
+      if (mine === seq) {
+        editing = null;
+        settingsOpen = false;
+        capturing = false;
+      }
     }
   }
 
@@ -124,15 +145,54 @@
     searchEl?.focus();
   }
 
+  async function openSettings() {
+    settingsOpen = true;
+    hotkeyMsg = "";
+    hotkey = await invoke<HotkeyStatus>("get_hotkey");
+  }
+
+  function startCapture() {
+    capturing = true;
+    hotkeyMsg = "Press the new keys. Esc cancels.";
+  }
+
+  async function onCaptureKey(e: KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      capturing = false;
+      hotkeyMsg = "";
+      return;
+    }
+    const got = captureHotkey(e);
+    if (!got) return;
+    if ("error" in got) {
+      hotkeyMsg = got.error;
+      return;
+    }
+    capturing = false;
+    try {
+      hotkey = await invoke<HotkeyStatus>("set_hotkey", { accelerator: got.accel });
+      hotkeyMsg = hotkey.portal ? "GNOME may ask you to confirm the new keys." : "Saved.";
+    } catch (err) {
+      hotkeyMsg = `${err}`;
+    }
+  }
+
   function onKey(e: KeyboardEvent) {
+    if (capturing) {
+      void onCaptureKey(e);
+      return;
+    }
     if (mode !== "expanded") return;
     if (e.key === "Escape") {
       e.preventDefault();
       if (editing) void back();
+      else if (settingsOpen) settingsOpen = false;
       else edge.escape();
       return;
     }
-    if (editing || document.activeElement?.id === "quick") return;
+    if (editing || settingsOpen || document.activeElement?.id === "quick") return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       selected = Math.min(selected + 1, notes.length - 1);
@@ -157,10 +217,13 @@
 
   onMount(() => {
     log("mounted");
-    invoke<{ focusOnHover: boolean; fixedWindow: boolean }>("platform").then((p) => {
+    invoke<{ focusOnHover: boolean; fixedWindow: boolean; os: typeof os }>("platform").then((p) => {
       focusOnHover = p.focusOnHover;
       fixedWindow = p.fixedWindow;
+      os = p.os;
     });
+    void listen("edge-hotkey", () => edge.hotkey());
+    void listen<HotkeyStatus>("edge-hotkey-status", (e) => (hotkey = e.payload));
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
     window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
     // On GNOME (XWayland) WebKitGTK does not always fire mouseleave when the pointer moves onto
@@ -200,7 +263,27 @@
       {#if notes.length}<span class="count">{notes.length}</span>{/if}
     </button>
   <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms">
-  {#if editing}
+  {#if settingsOpen}
+    <header>
+      <button onclick={() => (settingsOpen = false)} aria-label="Back to notes">←</button>
+      <span class="grow">Settings</span>
+      <button onclick={() => edge.escape()} aria-label="Close panel">✕</button>
+    </header>
+    <section class="setting">
+      <div class="grow">
+        <div>Open hotkey</div>
+        <div class="muted small">Opens this panel from any app, ready to type a note.</div>
+      </div>
+      <button class="keys" class:capturing onclick={startCapture} aria-label="Change hotkey">
+        {#if capturing}Press keys…{:else if hotkey}{formatHotkey(hotkey.accelerator, os)}{:else}…{/if}
+      </button>
+    </section>
+    {#if hotkey?.portal && hotkey.bound}
+      <p class="muted small">Your desktop has it bound as: {hotkey.bound.replace(/^Press /, "")}. You can also change it in Settings → Keyboard.</p>
+    {/if}
+    {#if hotkey?.error}<p class="error small">{hotkey.error}</p>{/if}
+    {#if hotkeyMsg}<p class="muted small" role="status">{hotkeyMsg}</p>{/if}
+  {:else if editing}
     <header>
       <button onclick={back} aria-label="Back to notes">←</button>
       <span class="muted grow">{editing.title || "Untitled"}</span>
@@ -217,6 +300,7 @@
         placeholder="Search notes"
         aria-label="Search notes"
       />
+      <button onclick={openSettings} aria-label="Settings">⚙</button>
       <button onclick={() => edge.escape()} aria-label="Close panel">✕</button>
     </header>
     <ul>
@@ -234,6 +318,7 @@
     </ul>
     <input
       id="quick"
+      bind:this={quickEl}
       bind:value={quick}
       onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); void addQuick(); } }}
       placeholder="Quick note, Enter to save"
@@ -377,6 +462,29 @@
   .grow {
     flex: 1;
     min-width: 0;
+  }
+  .setting {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 4px;
+  }
+  .keys {
+    border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: ui-monospace, monospace;
+    white-space: nowrap;
+  }
+  .keys.capturing {
+    border-color: Highlight;
+  }
+  .small {
+    font-size: 12px;
+    margin: 0 4px;
+  }
+  .error {
+    color: #d33;
   }
   header {
     display: flex;
