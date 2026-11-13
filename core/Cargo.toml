@@ -1,0 +1,11 @@
+[package]
+name = "notes-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Shared note model, local store, search and sync logic for Edge"
+
+[dependencies]
+# bundled: same SQLite (with FTS5) on every platform, including Android.
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v7"] }
