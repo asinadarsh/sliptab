@@ -51,6 +51,14 @@ fn set_expanded(window: WebviewWindow, expanded: bool, focus: bool) -> CmdResult
     Ok(())
 }
 
+/// On GNOME the panel runs under XWayland, which loses track of the pointer once it moves onto a
+/// Wayland window, so "mouse left" never arrives. There the panel takes focus when it opens and
+/// closes on blur instead (GNOME reports focus changes reliably). See PLATFORMS.md.
+#[tauri::command]
+fn focus_on_hover() -> bool {
+    edge::backend() == "x11" && std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
 /// Lets the webview write to the dev console (debug builds only; a no-op in release).
 #[tauri::command]
 fn debug_log(msg: String) {
@@ -83,6 +91,7 @@ pub fn run() {
 
             let window = app.get_webview_window("main").expect("main window is declared in tauri.conf.json");
             let placed = edge::place(&window, false)?;
+            edge::forward_pointer_crossings(&window)?;
             window.show()?;
             if std::env::var_os("EDGE_PROBE").is_some() {
                 // Task 3 probe: did the window manager honour our position?
@@ -96,6 +105,16 @@ pub fn run() {
                         w.outer_position().ok(),
                         w.outer_size().ok()
                     );
+                    // Expand then collapse, reporting where the window really ends up each time.
+                    for expanded in [true, false] {
+                        let r = edge::place(&w, expanded).ok().flatten();
+                        std::thread::sleep(std::time::Duration::from_millis(800));
+                        eprintln!(
+                            "EDGE_PROBE expanded={expanded} requested={r:?} actual_pos={:?} actual_size={:?}",
+                            w.outer_position().ok(),
+                            w.outer_size().ok()
+                        );
+                    }
                 });
             }
             Ok(())
@@ -107,7 +126,8 @@ pub fn run() {
             note_update,
             note_set_pinned,
             set_expanded,
-            debug_log
+            debug_log,
+            focus_on_hover
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

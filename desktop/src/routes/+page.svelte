@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
 
@@ -21,17 +22,19 @@
   let searchEl: HTMLInputElement | undefined = $state();
   let editorEl: HTMLTextAreaElement | undefined = $state();
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let focusOnHover = false;
 
   const edge = createEdge({
-    hoverDelay: 300,
+    hoverDelay: 600,
     leaveDelay: 400,
     onChange: (m: Mode, reason: Reason) => void changeMode(m, reason),
   });
 
   async function changeMode(m: Mode, reason: Reason) {
     if (m === "collapsed") await flushSave();
-    // Only take keyboard focus when the user asked for the panel on purpose.
-    const focus = reason === "hotkey" || reason === "click";
+    // Only take keyboard focus when the user asked for the panel on purpose,
+    // except on GNOME, where focus is the only reliable way to know the user moved on.
+    const focus = reason === "hotkey" || reason === "click" || (reason === "hover" && focusOnHover);
     await invoke("set_expanded", { expanded: m === "expanded", focus });
     mode = m;
     if (m === "expanded") {
@@ -125,8 +128,29 @@
 
   onMount(() => {
     log("mounted");
+    invoke<boolean>("focus_on_hover").then((v) => (focusOnHover = v));
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
     window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
+    // On GNOME (XWayland) WebKitGTK does not always fire mouseleave when the pointer moves onto
+    // a Wayland window, so also treat "mouseout to nowhere" and losing focus as leaving.
+    const leftWindow = (e: MouseEvent) => {
+      if (!e.relatedTarget) {
+        log("mouseout-window");
+        edge.pointerLeave();
+      }
+    };
+    const blurred = () => {
+      log("blur");
+      if (edge.mode === "expanded") edge.escape();
+    };
+    document.addEventListener("mouseout", leftWindow);
+    // Native crossings from GTK (Linux), more reliable than the DOM ones under XWayland.
+    void listen<string>("edge-pointer", (e) => {
+      log(`native-${e.payload}`);
+      if (e.payload === "leave") edge.pointerLeave();
+      else edge.pointerEnter();
+    });
+    window.addEventListener("blur", blurred);
     void refresh();
   });
 </script>
@@ -138,6 +162,7 @@
   class:expanded={mode === "expanded"}
   onmouseenter={() => { log("enter"); edge.pointerEnter(); }}
   onmouseleave={() => { log("leave"); edge.pointerLeave(); }}
+  onmousemove={() => edge.pointerMove()}
 >
   {#if mode === "collapsed"}
     <button class="bar" onclick={() => edge.click()} aria-label="Open notes ({notes.length})">
@@ -146,17 +171,22 @@
   {:else if editing}
     <header>
       <button onclick={back} aria-label="Back to notes">←</button>
-      <span class="muted">{editing.title || "Untitled"}</span>
+      <span class="muted grow">{editing.title || "Untitled"}</span>
+      <button onclick={() => edge.escape()} aria-label="Close panel">✕</button>
     </header>
     <textarea bind:this={editorEl} bind:value={draft} oninput={scheduleSave} spellcheck="true"></textarea>
   {:else}
-    <input
-      bind:this={searchEl}
+    <header>
+      <input
+        class="grow"
+        bind:this={searchEl}
       bind:value={query}
       oninput={() => { selected = 0; void refresh(); }}
-      placeholder="Search notes"
-      aria-label="Search notes"
-    />
+        placeholder="Search notes"
+        aria-label="Search notes"
+      />
+      <button onclick={() => edge.escape()} aria-label="Close panel">✕</button>
+    </header>
     <ul>
       {#each notes as n, i (n.id)}
         <li class:sel={i === selected}>
@@ -274,6 +304,10 @@
   }
   .empty {
     padding: 8px;
+  }
+  .grow {
+    flex: 1;
+    min-width: 0;
   }
   header {
     display: flex;
