@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 /// One note. Timestamps are milliseconds since the Unix epoch, taken from the device clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Note {
     /// UUIDv7, created on the device so offline notes never collide.
     pub id: Uuid,

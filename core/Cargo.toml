@@ -9,3 +9,7 @@ description = "Shared note model, local store, search and sync logic for Edge"
 # bundled: same SQLite (with FTS5) on every platform, including Android.
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v7"] }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[features]
+serde = ["dep:serde", "uuid/serde"]
