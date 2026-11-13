@@ -41,7 +41,48 @@ pub fn place(window: &WebviewWindow, expanded: bool) -> tauri::Result<Option<Rec
     let r = edge_rect(work, monitor.scale_factor(), expanded);
     window.set_size(PhysicalSize::new(r.w, r.h))?;
     window.set_position(PhysicalPosition::new(r.x, r.y))?;
+    // ponytail: GTK can send the resize and move together; the window manager then keeps the still-wide
+    // window on screen and the bar lands at the panel's old left edge. Repeating the move after the
+    // resize lands fixes it. A configure-event hook would be exact if 120 ms ever proves too short.
+    let w = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let _ = w.set_position(PhysicalPosition::new(r.x, r.y));
+    });
     Ok(Some(r))
+}
+
+/// Forward the toplevel window's own pointer crossings to the webview as `edge-pointer` events
+/// ("enter" / "leave"). WebKitGTK under XWayland drops many of its DOM mouseleave events, but GTK
+/// still receives the X11 crossing. Crossings into child widgets (the webview itself) are ignored.
+#[cfg(target_os = "linux")]
+pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
+    use gtk::gdk::NotifyType;
+    use gtk::prelude::*;
+    use tauri::Emitter;
+
+    let gtk_window = window.gtk_window()?;
+    gtk_window.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
+    for (kind, leave) in [("enter", false), ("leave", true)] {
+        let w = window.clone();
+        let handler = move |_: &gtk::ApplicationWindow, e: &gtk::gdk::EventCrossing| {
+            if e.detail() != NotifyType::Inferior {
+                let _ = w.emit("edge-pointer", kind);
+            }
+            gtk::glib::Propagation::Proceed
+        };
+        if leave {
+            gtk_window.connect_leave_notify_event(handler);
+        } else {
+            gtk_window.connect_enter_notify_event(handler);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn forward_pointer_crossings(_window: &WebviewWindow) -> tauri::Result<()> {
+    Ok(())
 }
 
 /// Which windowing backend we ended up on. GNOME on Wayland ignores window positioning
