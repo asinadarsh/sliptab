@@ -53,6 +53,11 @@ export function createEdge({ hoverDelay, leaveDelay, onChange, timers = realTime
       if (mode === "collapsed" && !paused) after(hoverDelay, "expanded", "hover");
       else cancel(); // back inside the panel: keep it open
     },
+    /** Movement over the window. Starts the hover timer if one is not already running, so hover still
+     *  works when the platform drops enter/leave events (WebKitGTK under XWayland does). */
+    pointerMove() {
+      if (mode === "collapsed" && !paused && pending === null) after(hoverDelay, "expanded", "hover");
+    },
     pointerLeave() {
       if (mode === "expanded") after(leaveDelay, "collapsed", "leave");
       else cancel(); // passed over the bar too quickly

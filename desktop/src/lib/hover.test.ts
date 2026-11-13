@@ -94,3 +94,21 @@ test("pausing mid-hover cancels the pending expand", () => {
   advance(1000);
   assert.equal(edge.mode, "collapsed");
 });
+
+test("movement starts hover even when the enter event never arrived", () => {
+  const { edge, advance, changes } = setup();
+  edge.pointerMove();
+  advance(200);
+  edge.pointerMove(); // further movement must not restart the timer
+  advance(400);
+  assert.deepEqual(changes, [["expanded", "hover"]]);
+});
+
+test("leave after movement still cancels a passing mouse", () => {
+  const { edge, advance, changes } = setup();
+  edge.pointerMove();
+  advance(100);
+  edge.pointerLeave();
+  advance(1000);
+  assert.deepEqual(changes, []);
+});
