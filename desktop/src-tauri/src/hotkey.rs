@@ -106,6 +106,7 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
 /// "Super+Shift+N" → "LOGO+SHIFT+n", the XDG shortcut format the GlobalShortcuts portal takes.
 /// None if there is no modifier, no key, two keys, or a key we do not map.
+#[cfg(any(target_os = "linux", test))]
 pub fn to_xdg(accelerator: &str) -> Option<String> {
     let mut mods = Vec::new();
     let mut key = None;
@@ -131,6 +132,7 @@ pub fn to_xdg(accelerator: &str) -> Option<String> {
     (!mods.is_empty()).then(|| format!("{}+{key}", mods.join("+")))
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn xdg_key(k: &str) -> Option<String> {
     let named = match k {
         "space" => "space",
