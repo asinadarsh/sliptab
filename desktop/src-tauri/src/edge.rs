@@ -39,17 +39,52 @@ pub fn place(window: &WebviewWindow, expanded: bool) -> tauri::Result<Option<Rec
     let wa = monitor.work_area();
     let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width, h: wa.size.height };
     let r = edge_rect(work, monitor.scale_factor(), expanded);
+    #[cfg(target_os = "linux")]
+    {
+        let panel = edge_rect(work, monitor.scale_factor(), true);
+        let bar = edge_rect(work, monitor.scale_factor(), false);
+        if place_x11(window, panel, (!expanded).then_some(bar))? {
+            return Ok(Some(r));
+        }
+    }
     window.set_size(PhysicalSize::new(r.w, r.h))?;
     window.set_position(PhysicalPosition::new(r.x, r.y))?;
-    // ponytail: GTK can send the resize and move together; the window manager then keeps the still-wide
-    // window on screen and the bar lands at the panel's old left edge. Repeating the move after the
-    // resize lands fixes it. A configure-event hook would be exact if 120 ms ever proves too short.
-    let w = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(120));
-        let _ = w.set_position(PhysicalPosition::new(r.x, r.y));
-    });
     Ok(Some(r))
+}
+
+/// X11 (incl. GNOME's XWayland): the window always stays panel-sized and transparent, and only its
+/// input shape changes. When collapsed, only the bar takes the pointer; clicks elsewhere go through
+/// to the windows underneath. Resizing on every open made GNOME show the newly exposed area black
+/// for a frame before WebKit painted it, which looked like a flicker. Returns false when not on X11.
+#[cfg(target_os = "linux")]
+fn place_x11(window: &WebviewWindow, panel: Rect, bar: Option<Rect>) -> tauri::Result<bool> {
+    use gtk::cairo::{RectangleInt, Region};
+    use gtk::prelude::*;
+    let gtk_window = window.gtk_window()?;
+    if gtk_window.window().is_none() {
+        gtk_window.realize(); // create the X11 window now, before it is first shown
+    }
+    let Some(gdk_window) = gtk_window.window() else { return Ok(false) };
+    if !gdk_window.display().type_().name().contains("X11") {
+        return Ok(false);
+    }
+    // GDK works in its own (integer-scaled) units, Tauri's Rect is in physical pixels.
+    let s = gtk_window.scale_factor().max(1);
+    let (w, h) = (panel.w as i32 / s, panel.h as i32 / s);
+    let (x, y) = ((panel.x + panel.w as i32) / s - w, panel.y / s); // flush with the right edge
+    if gtk_window.size() != (w, h) || gdk_window.position() != (x, y) {
+        // One configure request for both, so GNOME never sees a half-applied geometry.
+        gdk_window.move_resize(x, y, w, h);
+        gtk_window.resize(w, h);
+        gtk_window.move_(x, y);
+    }
+    let region = bar.map(|b| {
+        let bw = (b.w as i32 / s).max(1);
+        let bh = b.h as i32 / s;
+        Region::create_rectangle(&RectangleInt::new(w - bw, (b.y - panel.y) / s, bw, bh))
+    });
+    gtk_window.input_shape_combine_region(region.as_ref());
+    Ok(true)
 }
 
 /// Forward the toplevel window's own pointer crossings to the webview as `edge-pointer` events

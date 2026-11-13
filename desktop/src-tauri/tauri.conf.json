@@ -23,7 +23,8 @@
         "visible": false,
         "focus": false,
         "visibleOnAllWorkspaces": true,
-        "shadow": false
+        "shadow": false,
+        "transparent": true
       }
     ],
     "security": {

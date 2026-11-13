@@ -51,12 +51,22 @@ fn set_expanded(window: WebviewWindow, expanded: bool, focus: bool) -> CmdResult
     Ok(())
 }
 
-/// On GNOME the panel runs under XWayland, which loses track of the pointer once it moves onto a
-/// Wayland window, so "mouse left" never arrives. There the panel takes focus when it opens and
-/// closes on blur instead (GNOME reports focus changes reliably). See PLATFORMS.md.
+/// How the edge window behaves on this platform.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Platform {
+    /// GNOME/XWayland loses the pointer once it moves onto a Wayland window, so "mouse left" can be
+    /// missed. There the panel takes focus when it opens and also closes on blur.
+    focus_on_hover: bool,
+    /// X11: the window never resizes (only its input shape changes), so the panel can start sliding
+    /// before Rust has answered. Elsewhere the window must grow first.
+    fixed_window: bool,
+}
+
 #[tauri::command]
-fn focus_on_hover() -> bool {
-    edge::backend() == "x11" && std::env::var_os("WAYLAND_DISPLAY").is_some()
+fn platform() -> Platform {
+    let x11 = cfg!(target_os = "linux") && edge::backend() == "x11";
+    Platform { focus_on_hover: x11 && std::env::var_os("WAYLAND_DISPLAY").is_some(), fixed_window: x11 }
 }
 
 /// Lets the webview write to the dev console (debug builds only; a no-op in release).
@@ -107,7 +117,13 @@ pub fn run() {
                     );
                     // Expand then collapse, reporting where the window really ends up each time.
                     for expanded in [true, false] {
-                        let r = edge::place(&w, expanded).ok().flatten();
+                        // GTK must be called on the main thread.
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let w2 = w.clone();
+                        let _ = w.run_on_main_thread(move || {
+                            let _ = tx.send(edge::place(&w2, expanded).ok().flatten());
+                        });
+                        let r = rx.recv().ok().flatten();
                         std::thread::sleep(std::time::Duration::from_millis(800));
                         eprintln!(
                             "EDGE_PROBE expanded={expanded} requested={r:?} actual_pos={:?} actual_size={:?}",
@@ -127,7 +143,7 @@ pub fn run() {
             note_set_pinned,
             set_expanded,
             debug_log,
-            focus_on_hover
+            platform
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
