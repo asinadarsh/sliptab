@@ -321,8 +321,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.db");
         let id = Store::open(&path, "d").unwrap().create("persist me").unwrap().id;
-        let s = Store::open(&path, "d").unwrap();
-        assert_eq!(s.get(id).unwrap().unwrap().body, "persist me");
+        let body = Store::open(&path, "d").unwrap().get(id).unwrap().unwrap().body;
+        assert_eq!(body, "persist me");
+        // Store is dropped by now; Windows refuses to delete an open database file.
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
