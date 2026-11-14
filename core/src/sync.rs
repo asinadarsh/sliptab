@@ -9,6 +9,7 @@
 
 use uuid::Uuid;
 
+use crate::link::Link;
 use crate::note::{derive_title, Note};
 
 /// The server state a device last saw for a note. None for a note made on this device.
@@ -70,9 +71,14 @@ pub fn body_hash(body: &str) -> u64 {
     body.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// The fields besides the text that a user sets: pin, archive and tab colour.
+/// The fields besides the text that a user sets: pin, archive and tab colour, and for a save its
+/// folder and done mark. A note without a link hashes exactly as before saves existed.
 pub fn meta_hash(n: &Note) -> u64 {
-    body_hash(&format!("{}|{}|{}", n.pinned, n.archived, n.color.as_deref().unwrap_or("")))
+    let mut s = format!("{}|{}|{}", n.pinned, n.archived, n.color.as_deref().unwrap_or(""));
+    if let Some(l) = &n.link {
+        s += &format!("|{}|{}", l.folder.as_deref().unwrap_or(""), l.done);
+    }
+    body_hash(&s)
 }
 
 /// Merges `mine` and `theirs`, two versions of the same note that both started from `base`.
@@ -105,6 +111,7 @@ pub fn merge(base: Option<Base>, mine: &Note, theirs: &Note) -> Merged {
         _ => newer,
     };
     (note.pinned, note.archived, note.color) = (meta_from.pinned, meta_from.archived, meta_from.color.clone());
+    note.link = merge_link(mine.link.as_ref(), theirs.link.as_ref(), meta_from.link.as_ref());
 
     let base_hash = base.map(|b| b.body_hash);
     let mine_changed = base_hash != Some(body_hash(&mine.body));
@@ -131,6 +138,21 @@ pub fn merge(base: Option<Base>, mine: &Note, theirs: &Note) -> Merged {
     Merged { note, copy }
 }
 
+/// A save's link: the fetched details from the later fetch, folder and done from `meta_from`
+/// (the side that changed them), and the latest open. A link only one side has is kept.
+fn merge_link(a: Option<&Link>, b: Option<&Link>, meta_from: Option<&Link>) -> Option<Link> {
+    let (a, b) = match (a, b) {
+        (Some(a), Some(b)) => (a, b),
+        (one, other) => return one.or(other).cloned(),
+    };
+    let mut l = if b.fetched_at > a.fetched_at { b.clone() } else { a.clone() };
+    if let Some(m) = meta_from {
+        (l.folder, l.done) = (m.folder.clone(), m.done);
+    }
+    l.opened_at = a.opened_at.max(b.opened_at);
+    Some(l)
+}
+
 /// Later `updated_at` wins; on a tie the larger device id, so both sides pick the same one.
 fn later<'a>(a: &'a Note, b: &'a Note) -> &'a Note {
     if (b.updated_at, &b.device_id) > (a.updated_at, &a.device_id) {
@@ -141,8 +163,8 @@ fn later<'a>(a: &'a Note, b: &'a Note) -> &'a Note {
 }
 
 fn same_content(a: &Note, b: &Note) -> bool {
-    (&a.body, a.pinned, a.archived, a.deleted_at.is_some(), &a.color)
-        == (&b.body, b.pinned, b.archived, b.deleted_at.is_some(), &b.color)
+    (&a.body, a.pinned, a.archived, a.deleted_at.is_some(), &a.color, &a.link)
+        == (&b.body, b.pinned, b.archived, b.deleted_at.is_some(), &b.color, &b.link)
 }
 
 fn conflict_copy(loser: &Note, of: Uuid) -> Note {
@@ -175,6 +197,7 @@ mod tests {
             version,
             conflict_of: None,
             color: None,
+            link: None,
         }
     }
 

@@ -17,7 +17,7 @@ ureq = { version = "3", features = ["json"], optional = true }
 [features]
 # The local SQLite store. The sync server only needs the note model and sync rules.
 default = ["store"]
-store = ["dep:rusqlite"]
+store = ["dep:rusqlite", "serde", "dep:serde_json"]
 # HTTP client for the sync server, used by the apps.
 client = ["store", "serde", "dep:ureq", "dep:serde_json"]
 serde = ["dep:serde", "uuid/serde"]

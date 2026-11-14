@@ -1,5 +1,7 @@
 use uuid::Uuid;
 
+use crate::link::Link;
+
 /// One note. Timestamps are milliseconds since the Unix epoch, taken from the device clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -23,6 +25,9 @@ pub struct Note {
     pub conflict_of: Option<Uuid>,
     /// Tab colour on the screen edge, "#rrggbb". Kept when unpinned so re-pinning keeps the colour.
     pub color: Option<String>,
+    /// Set when this note is a saved post (a save). Absent in notes from before saves existed.
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    pub link: Option<Link>,
 }
 
 /// Accepts "#rrggbb" only, so a colour from sync or a hand-edited database can't inject CSS.

@@ -152,3 +152,47 @@ fn notes_made_offline_on_both_devices_all_arrive() {
     settle(&mut phone, &mut laptop, &mut server);
     assert_eq!(phone.list().unwrap().len(), 2);
 }
+
+#[test]
+fn a_save_from_the_phone_reaches_the_laptop_with_its_folder() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let (s, new) = phone.create_save("https://www.instagram.com/reel/DftSYUwtKNT/?vrfl=abc").unwrap();
+    assert!(new);
+    phone.set_save_folder(s.id, Some("Learn")).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    let got = laptop.saves().unwrap();
+    assert_eq!(got.len(), 1);
+    let link = got[0].link.clone().unwrap();
+    assert_eq!((link.url.as_str(), link.platform.as_str()), ("https://www.instagram.com/reel/DftSYUwtKNT", "instagram"));
+    assert_eq!(link.folder.as_deref(), Some("Learn"));
+    assert!(laptop.list().unwrap().is_empty(), "a save is not listed among notes");
+}
+
+#[test]
+fn folder_on_one_device_and_done_after_sync_on_the_other_both_survive() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let (s, _) = phone.create_save("https://x.com/jack/status/20").unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    phone.set_save_folder(s.id, Some("Ideas")).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    laptop.set_save_done(s.id, true).unwrap();
+    laptop.mark_opened(s.id).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    let l = phone.get(s.id).unwrap().unwrap().link.unwrap();
+    assert_eq!((l.folder.as_deref(), l.done, l.opened_at.is_some()), (Some("Ideas"), true, true));
+}
+
+#[test]
+fn a_folder_change_and_a_text_edit_offline_merge_without_a_copy() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let (s, _) = phone.create_save("look https://youtu.be/hdMszZ2ah5Q").unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    phone.set_save_folder(s.id, Some("Watch Later")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    laptop.update_body(s.id, "look https://youtu.be/hdMszZ2ah5Q  for the talk").unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    let saves = phone.saves().unwrap();
+    assert_eq!(saves.len(), 1, "no conflict copy");
+    assert_eq!(saves[0].link.as_ref().unwrap().folder.as_deref(), Some("Watch Later"));
+    assert!(saves[0].body.ends_with("for the talk"));
+}
