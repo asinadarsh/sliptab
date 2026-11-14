@@ -1,6 +1,7 @@
 mod edge;
 mod hotkey;
 mod settings;
+mod sync;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,6 +13,8 @@ use tauri::{Manager, State, WebviewWindow};
 pub use edge::prefer_xwayland_on_gnome;
 
 struct Notes(Mutex<Store>);
+
+use sync::SyncState;
 
 /// Settings plus the directory they are saved in.
 struct AppSettings {
@@ -58,23 +61,31 @@ fn notes_search(s: State<Notes>, query: String) -> CmdResult<Vec<Note>> {
 }
 
 #[tauri::command]
-fn note_create(s: State<Notes>, body: String) -> CmdResult<Note> {
-    with_store(&s, |st| st.create(&body))
+fn note_create(s: State<Notes>, body: String, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.create(&body))?;
+    sync.kick(false);
+    Ok(n)
 }
 
 #[tauri::command]
-fn note_update(s: State<Notes>, id: Uuid, body: String) -> CmdResult<Note> {
-    with_store(&s, |st| st.update_body(id, &body))
+fn note_update(s: State<Notes>, id: Uuid, body: String, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.update_body(id, &body))?;
+    sync.kick(false);
+    Ok(n)
 }
 
 #[tauri::command]
-fn note_set_pinned(s: State<Notes>, id: Uuid, pinned: bool) -> CmdResult<Note> {
-    with_store(&s, |st| st.set_pinned(id, pinned))
+fn note_set_pinned(s: State<Notes>, id: Uuid, pinned: bool, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.set_pinned(id, pinned))?;
+    sync.kick(false);
+    Ok(n)
 }
 
 #[tauri::command]
-fn note_set_color(s: State<Notes>, id: Uuid, color: Option<String>) -> CmdResult<Note> {
-    with_store(&s, |st| st.set_color(id, color.as_deref()))
+fn note_set_color(s: State<Notes>, id: Uuid, color: Option<String>, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.set_color(id, color.as_deref()))?;
+    sync.kick(false);
+    Ok(n)
 }
 
 #[tauri::command]
@@ -82,9 +93,13 @@ fn set_expanded(
     window: WebviewWindow,
     s: State<AppSettings>,
     state: State<EdgeState>,
+    sync: State<SyncState>,
     expanded: bool,
     focus: bool,
 ) -> CmdResult<()> {
+    if expanded {
+        sync.kick(true); // fresh notes from the phone as the panel opens
+    }
     state.expanded.store(expanded, Ordering::Relaxed);
     state.place(&window, &current_settings(&s)?)?;
     if expanded && focus {
@@ -233,6 +248,7 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("notes.db"), device_id(&dir)?)?;
             app.manage(Notes(Mutex::new(store)));
+            sync::start(app.handle(), &dir);
             let loaded = settings::load(&dir);
             if let Err(e) = hotkey::apply(app.handle(), &loaded.hotkey, None) {
                 eprintln!("hotkey: {e}"); // shown in settings via get_hotkey's error
@@ -308,7 +324,12 @@ pub fn run() {
             get_settings,
             save_settings,
             get_autostart,
-            set_autostart
+            set_autostart,
+            sync::sync_status,
+            sync::sync_sign_in_start,
+            sync::sync_sign_in_verify,
+            sync::sync_sign_out,
+            sync::sync_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
