@@ -5,6 +5,15 @@
   import { createEdge, type Mode, type Reason } from "$lib/hover";
   import { captureHotkey, formatHotkey } from "$lib/accel";
 
+  type Settings = {
+    hotkey: string;
+    side: "left" | "right";
+    barPosition: number;
+    panelWidth: number | null;
+    hoverOpen: boolean;
+    showBar: boolean;
+    theme: "system" | "light" | "dark";
+  };
   type HotkeyStatus = { accelerator: string; bound: string | null; portal: boolean; error: string | null };
 
   type Note = {
@@ -32,6 +41,75 @@
   let capturing = $state(false);
   let hotkeyMsg = $state("");
   let quickEl: HTMLInputElement | undefined = $state();
+  let cfg: Settings = $state({
+    hotkey: "",
+    side: "right",
+    barPosition: 0.5,
+    panelWidth: null,
+    hoverOpen: true,
+    showBar: true,
+    theme: "system",
+  });
+  let autostart: boolean | null = $state(null);
+  let settingsMsg = $state("");
+  let dragging = false;
+
+  async function saveSettings(patch: Partial<Settings>) {
+    try {
+      cfg = await invoke<Settings>("save_settings", { new: { ...cfg, ...patch } });
+      settingsMsg = "";
+    } catch (e) {
+      settingsMsg = `Could not save: ${e}`;
+    }
+  }
+
+  async function toggleAutostart() {
+    try {
+      autostart = await invoke<boolean>("set_autostart", { enabled: !autostart });
+    } catch (e) {
+      settingsMsg = `Start on login: ${e}`;
+    }
+  }
+
+  $effect(() => {
+    document.documentElement.style.colorScheme = cfg.theme === "system" ? "light dark" : cfg.theme;
+  });
+  $effect(() => {
+    edge.setPaused(!cfg.hoverOpen);
+  });
+
+  // Drag the panel's inner edge to resize it. screenX deltas stay correct while the window itself
+  // moves under the pointer. Width updates go out at most once per frame and are saved on release.
+  function startResize(e: PointerEvent) {
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    dragging = true;
+    const startX = e.screenX;
+    const startW = window.innerWidth;
+    const dir = cfg.side === "right" ? -1 : 1;
+    let width = startW;
+    let frame = 0;
+    const move = (ev: PointerEvent) => {
+      width = Math.max(320, startW + dir * (ev.screenX - startX));
+      if (!frame)
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          void invoke("set_panel_width", { width, save: false });
+        });
+    };
+    const up = (ev: PointerEvent) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      cancelAnimationFrame(frame);
+      dragging = false;
+      cfg.panelWidth = width;
+      void invoke("set_panel_width", { width, save: true });
+      // Released outside the panel: treat it as leaving.
+      if (ev.clientX < 0 || ev.clientX > window.innerWidth) edge.pointerLeave();
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  }
 
   const edge = createEdge({
     hoverDelay: 0,
@@ -148,7 +226,9 @@
   async function openSettings() {
     settingsOpen = true;
     hotkeyMsg = "";
+    settingsMsg = "";
     hotkey = await invoke<HotkeyStatus>("get_hotkey");
+    autostart = await invoke<boolean>("get_autostart").catch(() => null);
   }
 
   function startCapture() {
@@ -222,6 +302,7 @@
       fixedWindow = p.fixedWindow;
       os = p.os;
     });
+    void invoke<Settings>("get_settings").then((c) => (cfg = c));
     void listen("edge-hotkey", () => edge.hotkey());
     void listen<HotkeyStatus>("edge-hotkey-status", (e) => (hotkey = e.payload));
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
@@ -229,7 +310,7 @@
     // On GNOME (XWayland) WebKitGTK does not always fire mouseleave when the pointer moves onto
     // a Wayland window, so also treat "mouseout to nowhere" and losing focus as leaving.
     const leftWindow = (e: MouseEvent) => {
-      if (!e.relatedTarget) {
+      if (!e.relatedTarget && !dragging) {
         log("mouseout-window");
         edge.pointerLeave();
       }
@@ -242,6 +323,7 @@
     // Native crossings from GTK (Linux), more reliable than the DOM ones under XWayland.
     void listen<string>("edge-pointer", (e) => {
       log(`native-${e.payload}`);
+      if (dragging) return; // the pointer leaves the window while dragging the edge outwards
       if (e.payload === "leave") edge.pointerLeave();
       else edge.pointerEnter();
     });
@@ -255,14 +337,18 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <main
   class:expanded={mode === "expanded"}
+  class:left={cfg.side === "left"}
+  style:--bar-pos={cfg.barPosition}
   onmouseenter={() => { log("enter"); edge.pointerEnter(); }}
   onmouseleave={() => { log("leave"); edge.pointerLeave(); }}
   onmousemove={() => edge.pointerMove()}
 >
-    <button class="bar" class:hidden={shown} onclick={() => edge.click()} aria-label="Open notes ({notes.length})">
+    <button class="bar" class:hidden={shown || !cfg.showBar} onclick={() => edge.click()} aria-label="Open notes ({notes.length})">
       {#if notes.length}<span class="count">{notes.length}</span>{/if}
     </button>
   <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="resize" onpointerdown={startResize} title="Drag to resize"></div>
   {#if settingsOpen}
     <header>
       <button onclick={() => (settingsOpen = false)} aria-label="Back to notes">←</button>
@@ -283,6 +369,53 @@
     {/if}
     {#if hotkey?.error}<p class="error small">{hotkey.error}</p>{/if}
     {#if hotkeyMsg}<p class="muted small" role="status">{hotkeyMsg}</p>{/if}
+
+    <section class="setting">
+      <div class="grow">Screen edge</div>
+      <div class="seg" role="group" aria-label="Screen edge">
+        <button class:on={cfg.side === "left"} onclick={() => saveSettings({ side: "left" })}>Left</button>
+        <button class:on={cfg.side === "right"} onclick={() => saveSettings({ side: "right" })}>Right</button>
+      </div>
+    </section>
+    <section class="setting">
+      <label class="grow" for="barpos">Bar position</label>
+      <input
+        id="barpos"
+        type="range"
+        min="0"
+        max="1"
+        step="0.01"
+        value={cfg.barPosition}
+        onchange={(e) => saveSettings({ barPosition: +e.currentTarget.value })}
+      />
+    </section>
+    <section class="setting">
+      <div class="grow">
+        <div>Open on hover</div>
+        <div class="muted small">Off: the bar opens only on click or the hotkey.</div>
+      </div>
+      <input type="checkbox" checked={cfg.hoverOpen} onchange={(e) => saveSettings({ hoverOpen: e.currentTarget.checked })} aria-label="Open on hover" />
+    </section>
+    <section class="setting">
+      <div class="grow">
+        <div>Show the bar</div>
+        <div class="muted small">Off: nothing on screen, only the hotkey opens notes.</div>
+      </div>
+      <input type="checkbox" checked={cfg.showBar} onchange={(e) => saveSettings({ showBar: e.currentTarget.checked })} aria-label="Show the bar" />
+    </section>
+    <section class="setting">
+      <div class="grow">Start on login</div>
+      <input type="checkbox" checked={!!autostart} disabled={autostart === null} onchange={toggleAutostart} aria-label="Start on login" />
+    </section>
+    <section class="setting">
+      <div class="grow">Theme</div>
+      <div class="seg" role="group" aria-label="Theme">
+        {#each ["system", "light", "dark"] as const as t}
+          <button class:on={cfg.theme === t} onclick={() => saveSettings({ theme: t })}>{t[0].toUpperCase() + t.slice(1)}</button>
+        {/each}
+      </div>
+    </section>
+    {#if settingsMsg}<p class="error small" role="status">{settingsMsg}</p>{/if}
   {:else if editing}
     <header>
       <button onclick={back} aria-label="Back to notes">←</button>
@@ -382,8 +515,8 @@
   .bar {
     position: fixed;
     right: 0;
-    top: 50%;
-    transform: translateY(-50%);
+    /* Same rule as edge.rs: bar_position 0..1 along the free space of the edge. */
+    top: calc((100vh - min(120px, 100vh)) * var(--bar-pos, 0.5));
     width: 8px;
     height: min(120px, 100vh);
     border: 0;
@@ -394,6 +527,50 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+  .left .bar {
+    right: auto;
+    left: 0;
+    border-radius: 0 4px 4px 0;
+  }
+  .left .panel {
+    border-radius: 0 12px 12px 0;
+    transform: translateX(-100%);
+  }
+  .left .panel.shown {
+    transform: none;
+  }
+  .panel {
+    position: relative;
+  }
+  .resize {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 6px;
+    cursor: ew-resize;
+    z-index: 1;
+  }
+  .left .resize {
+    left: auto;
+    right: 0;
+  }
+  .seg {
+    display: flex;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .seg button {
+    padding: 4px 10px;
+  }
+  .seg button.on {
+    background: color-mix(in srgb, Highlight 35%, Canvas);
+  }
+  input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
   }
   .count {
     writing-mode: vertical-rl;
