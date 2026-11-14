@@ -17,6 +17,14 @@ pub enum Theme {
     Dark,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    Cards,
+    Compact,
+    Sticky,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -32,6 +40,9 @@ pub struct Settings {
     /// Off = no bar at all; the hotkey is the only way in.
     pub show_bar: bool,
     pub theme: Theme,
+    pub layout: Layout,
+    /// Main bar and accent colour, "#rrggbb"; None = neutral grey.
+    pub bar_color: Option<String>,
 }
 
 impl Default for Settings {
@@ -44,6 +55,8 @@ impl Default for Settings {
             hover_open: true,
             show_bar: true,
             theme: Theme::System,
+            layout: Layout::Cards,
+            bar_color: None,
         }
     }
 }
@@ -53,6 +66,7 @@ impl Settings {
     pub fn sanitized(mut self) -> Self {
         self.bar_position = if self.bar_position.is_finite() { self.bar_position.clamp(0.0, 1.0) } else { 0.5 };
         self.panel_width = self.panel_width.filter(|w| w.is_finite() && *w > 0.0);
+        self.bar_color = self.bar_color.filter(|c| notes_core::valid_color(c));
         self
     }
 }
@@ -90,9 +104,10 @@ mod tests {
         std::fs::write(dir.join(FILE), "{not json").unwrap();
         assert_eq!(load(&dir).hotkey, crate::hotkey::DEFAULT);
         // An old file with only some fields, and out-of-range values, still loads.
-        std::fs::write(dir.join(FILE), r#"{"hotkey":"Alt+K","barPosition":7,"panelWidth":-3}"#).unwrap();
+        std::fs::write(dir.join(FILE), r#"{"hotkey":"Alt+K","barPosition":7,"panelWidth":-3,"barColor":"red;x"}"#).unwrap();
         let s = load(&dir);
         assert_eq!((s.hotkey.as_str(), s.bar_position, s.panel_width, s.show_bar), ("Alt+K", 1.0, None, true));
+        assert_eq!((s.bar_color, s.layout), (None, Layout::Cards));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

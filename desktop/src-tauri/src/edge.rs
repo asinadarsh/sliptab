@@ -5,9 +5,18 @@ use tauri::{PhysicalPosition, PhysicalSize, WebviewWindow};
 
 use crate::settings::{Settings, Side};
 
-/// Collapsed bar, in logical pixels.
+/// Collapsed edge, in logical pixels: pinned-note tabs stacked above the main bar.
+/// The webview draws the same strip; keep these in step with STRIP in +page.svelte.
 const BAR_WIDTH: f64 = 8.0;
 const BAR_HEIGHT: f64 = 120.0;
+const TAB_HEIGHT: f64 = 36.0;
+const TAB_GAP: f64 = 6.0;
+/// Six note tabs plus one "+N" tab at most.
+pub const MAX_TABS: usize = 7;
+
+fn strip_height(tabs: usize) -> f64 {
+    BAR_HEIGHT + tabs.min(MAX_TABS) as f64 * (TAB_HEIGHT + TAB_GAP)
+}
 /// The expanded panel defaults to a third of the work area; the user can drag it between these.
 pub const PANEL_MIN_WIDTH: f64 = 320.0;
 const PANEL_MAX_FRACTION: f64 = 0.8;
@@ -23,14 +32,14 @@ pub struct Rect {
 
 /// Where the window goes, given the monitor's work area (which excludes GNOME's top bar,
 /// the Windows taskbar and the macOS menu bar).
-pub fn edge_rect(work: Rect, scale: f64, expanded: bool, s: &Settings) -> Rect {
+pub fn edge_rect(work: Rect, scale: f64, expanded: bool, s: &Settings, tabs: usize) -> Rect {
     let (w, h) = if expanded {
         let min = ((PANEL_MIN_WIDTH * scale) as u32).min(work.w);
         let max = ((work.w as f64 * PANEL_MAX_FRACTION) as u32).max(min);
         let want = s.panel_width.map_or(work.w / 3, |w| (w * scale) as u32);
         (want.clamp(min, max), work.h)
     } else {
-        ((BAR_WIDTH * scale).round() as u32, ((BAR_HEIGHT * scale).round() as u32).min(work.h))
+        ((BAR_WIDTH * scale).round() as u32, ((strip_height(tabs) * scale).round() as u32).min(work.h))
     };
     let x = match s.side {
         Side::Left => work.x,
@@ -40,19 +49,19 @@ pub fn edge_rect(work: Rect, scale: f64, expanded: bool, s: &Settings) -> Rect {
     Rect { x, y, w, h }
 }
 
-pub fn place(window: &WebviewWindow, expanded: bool, s: &Settings) -> tauri::Result<Option<Rect>> {
+pub fn place(window: &WebviewWindow, expanded: bool, s: &Settings, tabs: usize) -> tauri::Result<Option<Rect>> {
     let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) else {
         return Ok(None);
     };
     let wa = monitor.work_area();
     let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width, h: wa.size.height };
     let scale = monitor.scale_factor();
-    let r = edge_rect(work, scale, expanded, s);
+    let r = edge_rect(work, scale, expanded, s, tabs);
     #[cfg(target_os = "linux")]
     {
-        let panel = edge_rect(work, scale, true, s);
+        let panel = edge_rect(work, scale, true, s, tabs);
         // Collapsed: only the bar takes the pointer, or nothing at all when the bar is hidden.
-        let input = (!expanded).then(|| s.show_bar.then(|| edge_rect(work, scale, false, s)));
+        let input = (!expanded).then(|| s.show_bar.then(|| edge_rect(work, scale, false, s, tabs)));
         if place_x11(window, panel, input)? {
             return Ok(Some(r));
         }
@@ -109,7 +118,7 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>) -
 }
 
 /// Forward the toplevel window's own pointer crossings to the webview as `edge-pointer` events
-/// ("enter" / "leave"). WebKitGTK under XWayland drops many of its DOM mouseleave events, but GTK
+/// ({kind: "enter" | "leave", x, y} in window coordinates, so the page can tell a tab from the bar). WebKitGTK under XWayland drops many of its DOM mouseleave events, but GTK
 /// still receives the X11 crossing. Crossings into child widgets (the webview itself) are ignored.
 #[cfg(target_os = "linux")]
 pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
@@ -123,7 +132,8 @@ pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
         let w = window.clone();
         let handler = move |_: &gtk::ApplicationWindow, e: &gtk::gdk::EventCrossing| {
             if e.detail() != NotifyType::Inferior {
-                let _ = w.emit("edge-pointer", kind);
+                let (x, y) = e.position();
+                let _ = w.emit("edge-pointer", serde_json::json!({ "kind": kind, "x": x, "y": y }));
             }
             gtk::glib::Propagation::Proceed
         };
@@ -174,27 +184,38 @@ mod tests {
     const WORK: Rect = Rect { x: 0, y: 32, w: 1920, h: 1048 };
 
     fn edge_rect(work: Rect, scale: f64, expanded: bool) -> Rect {
-        super::edge_rect(work, scale, expanded, &Settings::default())
+        super::edge_rect(work, scale, expanded, &Settings::default(), 0)
+    }
+
+    #[test]
+    fn tabs_grow_the_strip_and_stay_centred() {
+        let r = super::edge_rect(WORK, 1.0, false, &Settings::default(), 3);
+        assert_eq!(r.h, 120 + 3 * 42);
+        assert_eq!(r.y, 32 + (1048 - r.h as i32) / 2);
+        let capped = super::edge_rect(WORK, 1.0, false, &Settings::default(), 50);
+        assert_eq!(capped.h, 120 + 7 * 42);
+        let tiny = Rect { x: 0, y: 0, w: 800, h: 200 };
+        assert_eq!(super::edge_rect(tiny, 1.0, false, &Settings::default(), 7).h, 200);
     }
 
     #[test]
     fn left_side_and_bar_position() {
         let s = Settings { side: Side::Left, bar_position: 0.0, ..Default::default() };
-        assert_eq!(super::edge_rect(WORK, 1.0, false, &s), Rect { x: 0, y: 32, w: 8, h: 120 });
-        assert_eq!(super::edge_rect(WORK, 1.0, true, &s).x, 0);
+        assert_eq!(super::edge_rect(WORK, 1.0, false, &s, 0), Rect { x: 0, y: 32, w: 8, h: 120 });
+        assert_eq!(super::edge_rect(WORK, 1.0, true, &s, 0).x, 0);
         let bottom = Settings { bar_position: 1.0, ..Default::default() };
-        let r = super::edge_rect(WORK, 1.0, false, &bottom);
+        let r = super::edge_rect(WORK, 1.0, false, &bottom, 0);
         assert_eq!(r.y + r.h as i32, 32 + 1048);
     }
 
     #[test]
     fn dragged_panel_width_is_clamped() {
-        let w = |pw: f64| super::edge_rect(WORK, 1.0, true, &Settings { panel_width: Some(pw), ..Default::default() }).w;
+        let w = |pw: f64| super::edge_rect(WORK, 1.0, true, &Settings { panel_width: Some(pw), ..Default::default() }, 0).w;
         assert_eq!(w(500.0), 500);
         assert_eq!(w(50.0), 320);
         assert_eq!(w(5000.0), 1536);
         let hidpi = Settings { panel_width: Some(500.0), ..Default::default() };
-        assert_eq!(super::edge_rect(WORK, 2.0, true, &hidpi).w, 1000);
+        assert_eq!(super::edge_rect(WORK, 2.0, true, &hidpi, 0).w, 1000);
     }
 
     #[test]

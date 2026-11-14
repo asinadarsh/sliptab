@@ -3,7 +3,7 @@ mod hotkey;
 mod settings;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use notes_core::{Note, Store, Uuid};
@@ -19,9 +19,20 @@ struct AppSettings {
     current: Mutex<settings::Settings>,
 }
 
-/// Whether the panel is currently expanded, so a settings change can re-place the window correctly.
+/// Edge state a settings change needs to re-place the window: expanded or not, and how many
+/// pinned-note tabs the strip shows.
 #[derive(Default)]
-struct Expanded(AtomicBool);
+struct EdgeState {
+    expanded: AtomicBool,
+    tabs: AtomicUsize,
+}
+
+impl EdgeState {
+    fn place(&self, window: &WebviewWindow, s: &settings::Settings) -> CmdResult<()> {
+        let (expanded, tabs) = (self.expanded.load(Ordering::Relaxed), self.tabs.load(Ordering::Relaxed));
+        edge::place(window, expanded, s, tabs).map(|_| ()).map_err(|e| e.to_string())
+    }
+}
 
 type CmdResult<T> = Result<T, String>;
 
@@ -60,15 +71,20 @@ fn note_set_pinned(s: State<Notes>, id: Uuid, pinned: bool) -> CmdResult<Note> {
 }
 
 #[tauri::command]
+fn note_set_color(s: State<Notes>, id: Uuid, color: Option<String>) -> CmdResult<Note> {
+    with_store(&s, |st| st.set_color(id, color.as_deref()))
+}
+
+#[tauri::command]
 fn set_expanded(
     window: WebviewWindow,
     s: State<AppSettings>,
-    state: State<Expanded>,
+    state: State<EdgeState>,
     expanded: bool,
     focus: bool,
 ) -> CmdResult<()> {
-    state.0.store(expanded, Ordering::Relaxed);
-    edge::place(&window, expanded, &current_settings(&s)?).map_err(|e| e.to_string())?;
+    state.expanded.store(expanded, Ordering::Relaxed);
+    state.place(&window, &current_settings(&s)?)?;
     if expanded && focus {
         window.set_focus().map_err(|e| e.to_string())?;
     }
@@ -114,6 +130,15 @@ fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String)
     Ok(status)
 }
 
+/// The page reports how many tabs it draws, so the window/input area matches the strip.
+#[tauri::command]
+fn set_tab_count(window: WebviewWindow, s: State<AppSettings>, state: State<EdgeState>, count: usize) -> CmdResult<()> {
+    if state.tabs.swap(count.min(edge::MAX_TABS), Ordering::Relaxed) != count.min(edge::MAX_TABS) {
+        state.place(&window, &current_settings(&s)?)?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn get_settings(s: State<AppSettings>) -> CmdResult<settings::Settings> {
     current_settings(&s)
@@ -124,7 +149,7 @@ fn get_settings(s: State<AppSettings>) -> CmdResult<settings::Settings> {
 fn save_settings(
     window: WebviewWindow,
     s: State<AppSettings>,
-    state: State<Expanded>,
+    state: State<EdgeState>,
     new: settings::Settings,
 ) -> CmdResult<settings::Settings> {
     let saved = {
@@ -133,13 +158,19 @@ fn save_settings(
         settings::save(&s.dir, &current).map_err(|e| e.to_string())?;
         current.clone()
     };
-    edge::place(&window, state.0.load(Ordering::Relaxed), &saved).map_err(|e| e.to_string())?;
+    state.place(&window, &saved)?;
     Ok(saved)
 }
 
 /// Live resize while the user drags the panel edge; `save` on release only, to spare the disk.
 #[tauri::command]
-fn set_panel_width(window: WebviewWindow, s: State<AppSettings>, width: f64, save: bool) -> CmdResult<()> {
+fn set_panel_width(
+    window: WebviewWindow,
+    s: State<AppSettings>,
+    state: State<EdgeState>,
+    width: f64,
+    save: bool,
+) -> CmdResult<()> {
     let snapshot = {
         let mut current = s.current.lock().map_err(|e| e.to_string())?;
         current.panel_width = Some(width.max(edge::PANEL_MIN_WIDTH));
@@ -148,7 +179,7 @@ fn set_panel_width(window: WebviewWindow, s: State<AppSettings>, width: f64, sav
         }
         current.clone()
     };
-    edge::place(&window, true, &snapshot).map_err(|e| e.to_string())?;
+    edge::place(&window, true, &snapshot, state.tabs.load(Ordering::Relaxed)).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -189,7 +220,7 @@ fn device_id(dir: &Path) -> std::io::Result<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().manage(hotkey::Hotkey::default()).manage(Expanded::default());
+    let builder = tauri::Builder::default().manage(hotkey::Hotkey::default()).manage(EdgeState::default());
     #[cfg(desktop)]
     let builder = builder
         .plugin(hotkey::plugin())
@@ -205,7 +236,7 @@ pub fn run() {
                 eprintln!("hotkey: {e}"); // shown in settings via get_hotkey's error
             }
             let window = app.get_webview_window("main").expect("main window is declared in tauri.conf.json");
-            let placed = edge::place(&window, false, &loaded)?;
+            let placed = edge::place(&window, false, &loaded, 0)?;
             let probe_settings = loaded.clone();
             app.manage(AppSettings { dir: dir.clone(), current: Mutex::new(loaded) });
             edge::forward_pointer_crossings(&window)?;
@@ -231,7 +262,7 @@ pub fn run() {
                         let w2 = w.clone();
                         let ps = probe_settings.clone();
                         let _ = w.run_on_main_thread(move || {
-                            let _ = tx.send(edge::place(&w2, expanded, &ps).ok().flatten());
+                            let _ = tx.send(edge::place(&w2, expanded, &ps, 0).ok().flatten());
                         });
                         let r = rx.recv().ok().flatten();
                         std::thread::sleep(std::time::Duration::from_millis(800));
@@ -251,6 +282,8 @@ pub fn run() {
             note_create,
             note_update,
             note_set_pinned,
+            note_set_color,
+            set_tab_count,
             set_expanded,
             debug_log,
             platform,
