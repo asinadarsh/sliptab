@@ -7,9 +7,12 @@ description = "Shared note model, local store, search and sync logic for Edge"
 
 [dependencies]
 # bundled: same SQLite (with FTS5) on every platform, including Android.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 uuid = { version = "1", features = ["v7"] }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
+# The local SQLite store. The sync server only needs the note model and sync rules.
+default = ["store"]
+store = ["dep:rusqlite"]
 serde = ["dep:serde", "uuid/serde"]

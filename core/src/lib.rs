@@ -2,9 +2,11 @@
 //! Used by the desktop app, the mobile app (via flutter_rust_bridge) and the server.
 
 mod note;
+#[cfg(feature = "store")]
 mod store;
 pub mod sync;
 
 pub use note::{derive_title, valid_color, Note};
+#[cfg(feature = "store")]
 pub use store::Store;
 pub use uuid::Uuid;
