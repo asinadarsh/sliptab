@@ -4,7 +4,7 @@
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
   import { captureHotkey, formatHotkey } from "$lib/accel";
-  import { edgeTabs, nextColor, PALETTE, sections as toSections, type Note } from "$lib/notes";
+  import { checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note } from "$lib/notes";
   import Cards from "$lib/views/Cards.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Sticky from "$lib/views/Sticky.svelte";
@@ -55,7 +55,6 @@
   });
   let autostart: boolean | null = $state(null);
   let settingsMsg = $state("");
-  let dragging = false;
   /** Pinned-note tab under the pointer while collapsed: its title label shows next to it. */
   let hoverTab: string | null = $state(null);
   /** Note to open once the panel has expanded (a tab was clicked). */
@@ -86,14 +85,84 @@
   let seq = 0;
   let fixedWindow = false;
   let windowQueue: Promise<unknown> = Promise.resolve();
+  // Exits from GNOME/XWayland are reported with the LAST position seen inside the window, so the
+  // position of a leave says nothing. What we can trust is the live position GTK polls while the
+  // pointer is on us (`move` events). One false leave arrives right after the panel opens while
+  // the pointer is still pressed against the screen edge: during a short grace period a leave is
+  // dropped when the last polled position was on the outer edge, or when an enter follows.
+  const GRACE_MS = 400;
+  let openedAt = 0;
+  let lastMove: { x: number; y: number } | null = null;
+  let heldLeave: ReturnType<typeof setTimeout> | null = null;
+  const atOuterEdge = (p: { x: number } | null) =>
+    !!p && (cfg.side === "right" ? p.x >= innerWidth - 12 : p.x <= 12);
+  // After GTK reports the pointer left, WebKit can still deliver stale mousemove events at the old
+  // position (seen as the tab card refusing to hide). Once native crossings are known to work,
+  // DOM pointer events only count between a native enter and leave.
+  let nativeCrossings = false;
+  let nativeInside = false;
+  function onNativeLeave() {
+    nativeInside = false;
+    if (heldLeave) clearTimeout(heldLeave);
+    heldLeave = null;
+    const inGrace = mode === "expanded" && performance.now() - openedAt < GRACE_MS;
+    if (inGrace && atOuterEdge(lastMove)) {
+      log(`dropped leave just after opening, pointer at edge ${lastMove?.x.toFixed(0)}`);
+      return;
+    }
+    if (inGrace) {
+      heldLeave = setTimeout(() => {
+        heldLeave = null;
+        setHover(null);
+        edge.pointerLeave();
+      }, GRACE_MS);
+      return;
+    }
+    setHover(null);
+    edge.pointerLeave();
+  }
+  function onNativeEnter() {
+    nativeCrossings = nativeInside = true;
+    if (heldLeave) clearTimeout(heldLeave);
+    heldLeave = null;
+  }
+
+  // The tab preview hides only after the pointer has been off every tab for a moment, so a mouse
+  // wobbling across the strip's inner edge does not make the card blink.
+  const HOVER_HIDE_MS = 220;
+  let hoverHide: ReturnType<typeof setTimeout> | null = null;
+  function setHover(id: string | null) {
+    if (id) {
+      if (hoverHide) clearTimeout(hoverHide);
+      hoverHide = null;
+      hoverTab = id;
+    } else if (hoverTab && !hoverHide) {
+      hoverHide = setTimeout(() => {
+        hoverHide = null;
+        hoverTab = null;
+      }, HOVER_HIDE_MS);
+    }
+  }
+
   const setWindow = (expanded: boolean, focus: boolean) =>
     (windowQueue = windowQueue.then(() => invoke("set_expanded", { expanded, focus })).catch((e) => log(`${e}`)));
 
   async function changeMode(m: Mode, reason: Reason) {
     const mine = ++seq;
+    log(`mode ${m} (${reason})`);
     mode = m;
-    hoverTab = null;
     if (m === "expanded") {
+      openedAt = performance.now();
+      // Opening from a tab: switch to that note BEFORE the slide starts, so the panel never
+      // shows the list for a frame and then jumps to the editor.
+      const target = pendingOpen;
+      pendingOpen = null;
+      if (target) {
+        settingsOpen = false;
+        if (editing && draft !== editing.body) void flushSave();
+        editing = target;
+        draft = target.body;
+      }
       const focus = reason === "hotkey" || reason === "click" || (reason === "hover" && focusOnHover);
       if (fixedWindow) {
         shown = true;
@@ -104,11 +173,13 @@
         if (mine !== seq) return;
         shown = true;
       }
-      const target = pendingOpen;
-      pendingOpen = null;
+      // The hovered tab's card stays until the panel has slid over it, then goes.
+      void sleep(OPEN_MS).then(() => {
+        if (mine === seq) hoverTab = null;
+      });
       if (target) {
-        settingsOpen = false;
-        void open(target);
+        await tick();
+        editorEl?.focus();
       } else if (reason === "hotkey") {
         editing = null;
         settingsOpen = false;
@@ -119,6 +190,8 @@
       }
       void refresh();
     } else {
+      hoverTab = null;
+      (document.activeElement as HTMLElement | null)?.blur(); // never type into a hidden panel
       shown = false;
       void flushSave();
       await sleep(CLOSE_MS);
@@ -139,6 +212,12 @@
     if (!flat.some((n) => n.id === selectedId)) selectedId = flat[0]?.id ?? null;
   }
 
+  /** Put an updated note into both lists at once, so tabs and cards change without a reload. */
+  function patch(n: Note) {
+    all = all.map((x) => (x.id === n.id ? n : x));
+    notes = notes.map((x) => (x.id === n.id ? n : x));
+  }
+
   async function open(n: Note) {
     await flushSave();
     editing = n;
@@ -157,6 +236,7 @@
     saveTimer = null;
     if (editing && draft !== editing.body) {
       editing = await invoke<Note>("note_update", { id: editing.id, body: draft });
+      patch(editing);
     }
   }
 
@@ -205,10 +285,15 @@
   function targetAt(x: number, y: number): EdgeTarget | null {
     const el = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest<HTMLElement>("[data-edge]");
     if (!el) return null;
-    return el.dataset.edge === "tab" ? { kind: "tab", id: el.dataset.id! } : { kind: "bar" };
+    return el.dataset.edge === "tab" || el.dataset.edge === "peek" ? { kind: "tab", id: el.dataset.id! } : { kind: "bar" };
   }
 
   /** While collapsed only the main bar (and +N) opens on hover; a tab shows its title. */
+  function domPointerAt(x: number, y: number, entering: boolean) {
+    if (nativeCrossings && !nativeInside) return;
+    pointerAt(x, y, entering);
+  }
+
   function pointerAt(x: number, y: number, entering: boolean) {
     if (mode === "expanded") {
       if (entering) edge.pointerEnter();
@@ -216,7 +301,7 @@
       return;
     }
     const t = targetAt(x, y);
-    hoverTab = t?.kind === "tab" ? t.id : null;
+    setHover(t?.kind === "tab" ? t.id : null);
     if (t?.kind === "bar") {
       if (entering) edge.pointerEnter();
       else edge.pointerMove();
@@ -224,9 +309,22 @@
   }
 
   function openTab(n: Note) {
-    pendingOpen = n;
+    pendingOpen = all.find((x) => x.id === n.id) ?? n;
     edge.click();
   }
+
+  const hovered = $derived(edgeItems.tabs.find((n) => n.id === hoverTab) ?? null);
+  // While the card shows (and the panel is collapsed), Rust adds its box to the clickable area.
+  let peekEl: HTMLElement | undefined = $state();
+  $effect(() => {
+    const el = peekEl;
+    if (!hovered || !el || mode === "expanded") {
+      void invoke("set_peek", { rect: null }).catch(() => {});
+      return;
+    }
+    const r = el.getBoundingClientRect();
+    void invoke("set_peek", { rect: { x: r.left, y: r.top, w: r.width, h: r.height } }).catch(() => {});
+  });
 
   // ---- settings
   async function saveSettings(patch: Partial<Settings>) {
@@ -292,35 +390,15 @@
     }
   }
 
-  // Drag the panel's inner edge to resize it (screenX deltas survive the window moving underneath).
-  function startResize(e: PointerEvent) {
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
-    dragging = true;
-    const startX = e.screenX;
-    const startW = window.innerWidth;
-    const dir = cfg.side === "right" ? -1 : 1;
-    let width = startW;
-    let frame = 0;
-    const move = (ev: PointerEvent) => {
-      width = Math.max(320, startW + dir * (ev.screenX - startX));
-      if (!frame)
-        frame = requestAnimationFrame(() => {
-          frame = 0;
-          void invoke("set_panel_width", { width, save: false });
-        });
-    };
-    const up = (ev: PointerEvent) => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", up);
-      cancelAnimationFrame(frame);
-      dragging = false;
-      cfg.panelWidth = width;
-      void invoke("set_panel_width", { width, save: true });
-      if (ev.clientX < 0 || ev.clientX > window.innerWidth) edge.pointerLeave();
-    };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", up);
+  // Hover opens the panel without keyboard focus (so typing stays in your app). A click inside asks
+  // for focus, then puts the caret where you clicked; GNOME does not focus a dock on click by itself.
+  function claimFocus(e: PointerEvent) {
+    if (document.hasFocus()) return;
+    const target = e.target as HTMLElement;
+    void invoke("focus_panel").then(() => {
+      const field = target.closest<HTMLElement>("input, textarea");
+      if (field && document.activeElement !== field) field.focus();
+    });
   }
 
   // ---- keyboard
@@ -363,17 +441,17 @@
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
     window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
     // WebKitGTK under XWayland drops DOM mouseleave; GTK's own crossings (with x/y) are reliable.
-    void listen<{ kind: "enter" | "leave"; x: number; y: number }>("edge-pointer", (e) => {
-      if (dragging) return;
+    void listen<{ kind: "enter" | "leave" | "move"; x: number; y: number }>("edge-pointer", (e) => {
       if (e.payload.kind === "leave") {
-        hoverTab = null;
-        edge.pointerLeave();
+        onNativeLeave();
       } else {
-        pointerAt(e.payload.x, e.payload.y, true);
+        if (e.payload.kind === "enter") onNativeEnter();
+        else lastMove = { x: e.payload.x, y: e.payload.y };
+        pointerAt(e.payload.x, e.payload.y, e.payload.kind === "enter");
       }
     });
     document.addEventListener("mouseout", (e) => {
-      if (!e.relatedTarget && !dragging) {
+      if (!e.relatedTarget) {
         hoverTab = null;
         edge.pointerLeave();
       }
@@ -430,24 +508,23 @@
   class:left={cfg.side === "left"}
   style:--accent={cfg.barColor ?? "#3b82f6"}
   style:--bar={cfg.barColor ?? "#8a8f99"}
-  onmouseenter={(e) => pointerAt(e.clientX, e.clientY, true)}
+  onmouseenter={(e) => domPointerAt(e.clientX, e.clientY, true)}
   onmouseleave={() => {
     hoverTab = null;
     edge.pointerLeave();
   }}
-  onmousemove={(e) => pointerAt(e.clientX, e.clientY, false)}
+  onmousemove={(e) => domPointerAt(e.clientX, e.clientY, false)}
 >
   <div
     class="strip"
+    ondragstart={(e) => e.preventDefault()}
     class:hidden={shown || !cfg.showBar}
     style:height="min({stripHeight}px, 100vh)"
     style:top="calc((100vh - min({stripHeight}px, 100vh)) * {cfg.barPosition})"
   >
     {#each edgeItems.tabs as n (n.id)}
       <button class="tab" class:hover={hoverTab === n.id} data-edge="tab" data-id={n.id} style:--c={n.color ?? "var(--bar)"}
-        onclick={() => openTab(n)} aria-label="Open {n.title}" title={n.title}>
-        {#if hoverTab === n.id}<span class="lbl">{n.title || "Untitled"}</span>{/if}
-      </button>
+        onclick={() => openTab(n)} aria-label="Open {n.title}"></button>
     {/each}
     {#if edgeItems.more}
       <button class="tab more" data-edge="bar" onclick={() => edge.click()} aria-label="{edgeItems.more} more pinned notes">
@@ -459,9 +536,34 @@
     </button>
   </div>
 
-  <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms">
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="resize" onpointerdown={startResize} title="Drag to resize"></div>
+  {#if hovered}
+    {@const items = checklistItems(hovered)}
+    {@const tabIndex = edgeItems.tabs.indexOf(hovered)}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div
+      class="peek"
+      bind:this={peekEl}
+      onclick={() => hovered && openTab(hovered)}
+      data-edge="peek"
+      data-id={hovered.id}
+      style:--c={hovered.color ?? "var(--bar)"}
+      style:top="clamp(8px, calc((100vh - min({stripHeight}px, 100vh)) * {cfg.barPosition} + {tabIndex * 42}px - 40px), calc(100vh - 340px))"
+    >
+      <div class="peek-t">{hovered.title || "Untitled"}</div>
+      <div class="peek-b">
+        {#each hovered.body.split("\n").slice(1) as line}
+          {@const item = /^\s*- \[([ xX])\] (.*)$/.exec(line)}
+          {#if item}<div class="ci" class:done={item[1] !== " "}>{item[1] !== " " ? "☑" : "☐"} {item[2]}</div>
+          {:else if line.trim()}<div>{line}</div>
+          {:else}<div class="gap"></div>{/if}
+        {/each}
+      </div>
+      <div class="peek-f">{items.length ? `${items.filter((i) => i.done).length}/${items.length} done · ` : ""}Click to edit</div>
+    </div>
+  {/if}
+
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms" onpointerdown={claimFocus}>
 
     {#if settingsOpen}
       <header class="top">
@@ -628,6 +730,10 @@
 
   /* ---- the edge strip: tabs above the main bar, positioned like edge.rs */
   .strip {
+    /* No text selection or drag gestures on the edge: a drag starts a pointer grab that left
+       GNOME/XWayland with the panel half drawn. */
+    user-select: none;
+    -webkit-user-drag: none;
     position: fixed;
     right: 0;
     width: 8px;
@@ -671,30 +777,56 @@
     align-items: center;
     justify-content: center;
   }
-  .lbl {
-    position: absolute;
-    right: 16px;
-    top: 50%;
-    transform: translateY(-50%);
-    white-space: nowrap;
-    max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    background: var(--c);
-    color: #fff;
-    font-weight: 600;
-    font-size: 12.5px;
-    padding: 5px 10px;
-    border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-    pointer-events: none;
-    animation: lbl 0.12s ease-out;
+  /* Preview of the hovered tab: the whole note, beside the edge, clickable to edit. */
+  .peek {
+    position: fixed;
+    right: 8px;
+    width: 300px;
+    max-height: 320px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 12px 0 12px 12px;
+    border-top: 4px solid var(--c);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    padding: 10px 14px 8px;
+    box-sizing: border-box;
+    cursor: pointer;
+    animation: peek 0.12s ease-out;
   }
-  @keyframes lbl {
+  @keyframes peek {
     from {
       opacity: 0;
-      transform: translate(6px, -50%);
+      transform: translateX(8px);
     }
+  }
+  .peek-t {
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .peek-b {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 13px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    -webkit-mask-image: linear-gradient(to bottom, #000 85%, transparent);
+    mask-image: linear-gradient(to bottom, #000 85%, transparent);
+  }
+  .peek-b .gap {
+    height: 6px;
+  }
+  .peek-b .ci.done {
+    color: var(--faint);
+    text-decoration: line-through;
+  }
+  .peek-f {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--faint);
   }
   .left .strip {
     right: auto;
@@ -704,9 +836,10 @@
   .left .bar {
     border-radius: 0 5px 5px 0;
   }
-  .left .lbl {
+  .left .peek {
     right: auto;
-    left: 16px;
+    left: 8px;
+    border-radius: 0 12px 12px 12px;
   }
 
   /* ---- the panel */
@@ -749,19 +882,6 @@
     .panel.shown {
       transition: none;
     }
-  }
-  .resize {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    width: 6px;
-    cursor: ew-resize;
-    z-index: 1;
-  }
-  .left .resize {
-    left: auto;
-    right: 0;
   }
 
   /* ---- shared chrome */
