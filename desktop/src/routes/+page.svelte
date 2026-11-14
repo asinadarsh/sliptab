@@ -4,7 +4,7 @@
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
   import { captureHotkey, formatHotkey } from "$lib/accel";
-  import { checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note } from "$lib/notes";
+  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note } from "$lib/notes";
   import Cards from "$lib/views/Cards.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Sticky from "$lib/views/Sticky.svelte";
@@ -55,6 +55,17 @@
   });
   let autostart: boolean | null = $state(null);
   let settingsMsg = $state("");
+
+  // ---- sync (runs in Rust; the page shows its status and does sign-in)
+  type SyncStatus = { email: string | null; lastSyncedAt: number | null; error: string | null; received: number };
+  let sync: SyncStatus = $state({ email: null, lastSyncedAt: null, error: null, received: 0 });
+  let syncEmail = $state("");
+  let syncCode = $state("");
+  let codeSent = $state(false);
+  let syncBusy = $state(false);
+  let syncMsg = $state("");
+  /** A note arrived from another device since the panel was last open: dot on the bar. */
+  let arrived = $state(false);
   /** Pinned-note tab under the pointer while collapsed: its title label shows next to it. */
   let hoverTab: string | null = $state(null);
   /** Note to open once the panel has expanded (a tab was clicked). */
@@ -353,6 +364,32 @@
   $effect(() => {
     edge.setPaused(!cfg.hoverOpen);
   });
+  $effect(() => {
+    if (shown) arrived = false;
+  });
+
+  async function syncStep(action: () => Promise<void>) {
+    syncBusy = true;
+    syncMsg = "";
+    try {
+      await action();
+    } catch (e) {
+      syncMsg = String(e);
+    }
+    syncBusy = false;
+  }
+  const sendCode = () =>
+    syncStep(async () => {
+      await invoke("sync_sign_in_start", { email: syncEmail });
+      codeSent = true;
+    });
+  const verifyCode = () =>
+    syncStep(async () => {
+      sync = await invoke<SyncStatus>("sync_sign_in_verify", { email: syncEmail, code: syncCode });
+      codeSent = false;
+      syncCode = "";
+    });
+  const signOutSync = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_out")));
 
   async function openSettings() {
     settingsOpen = true;
@@ -437,6 +474,14 @@
     });
     void invoke<Settings>("get_settings").then((c) => (cfg = c));
     void listen("edge-hotkey", () => edge.hotkey());
+    void invoke<SyncStatus>("sync_status").then((st) => (sync = st));
+    void listen<SyncStatus>("sync-status", (e) => {
+      sync = e.payload;
+      if (e.payload.received > 0) {
+        void refresh();
+        if (!shown) arrived = true;
+      }
+    });
     void listen<HotkeyStatus>("edge-hotkey-status", (e) => (hotkey = e.payload));
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
     window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
@@ -531,7 +576,8 @@
         <span>+{edgeItems.more}</span>
       </button>
     {/if}
-    <button class="bar" data-edge="bar" onclick={() => edge.click()} aria-label="Open notes ({all.length})">
+    <button class="bar" data-edge="bar" onclick={() => edge.click()} aria-label="Open notes ({all.length}){arrived ? ', new from another device' : ''}">
+      {#if arrived}<i class="arrived"></i>{/if}
       {#if all.length}<span>{all.length}</span>{/if}
     </button>
   </div>
@@ -572,6 +618,43 @@
         <button class="ib" onclick={() => edge.escape()} aria-label="Close panel"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
       </header>
       <div class="settings">
+        <div class="group">Sync</div>
+        {#if sync.email}
+          <section class="setting">
+            <div class="grow">
+              <div class="ellipsis">{sync.email}</div>
+              <div class="sub">{sync.lastSyncedAt ? `Synced ${ago(sync.lastSyncedAt) === "now" ? "just now" : ago(sync.lastSyncedAt) + " ago"}` : "Not synced yet"}</div>
+            </div>
+            <button class="pill" disabled={syncBusy} onclick={() => invoke("sync_now")}>Sync now</button>
+          </section>
+          {#if sync.error}<p class="error pad">{sync.error}</p>{/if}
+          <section class="setting">
+            <div class="grow sub">Notes stay on this laptop if you sign out.</div>
+            <button class="pill" disabled={syncBusy} onclick={signOutSync}>Sign out</button>
+          </section>
+        {:else}
+          <section class="setting col">
+            <div class="sub">Get your phone's notes here. Free for 14 days, no card needed.</div>
+            {#if !codeSent}
+              <div class="row">
+                <input class="field grow" type="email" placeholder="Email" bind:value={syncEmail} aria-label="Email"
+                  onkeydown={(e) => e.key === "Enter" && sendCode()} />
+                <button class="pill" disabled={syncBusy || !syncEmail.trim()} onclick={sendCode}>Send code</button>
+              </div>
+            {:else}
+              <div class="sub">Enter the 6-digit code sent to {syncEmail.trim()}.</div>
+              <div class="row">
+                <input class="field grow" inputmode="numeric" maxlength="6" placeholder="Code" bind:value={syncCode} aria-label="Code"
+                  onkeydown={(e) => e.key === "Enter" && verifyCode()} />
+                <button class="pill" disabled={syncBusy || syncCode.trim().length !== 6} onclick={verifyCode}>Turn on sync</button>
+              </div>
+              <button class="link" onclick={() => ((codeSent = false), (syncCode = ""))}>Use a different email</button>
+            {/if}
+          </section>
+          {#if sync.error}<p class="error pad">{sync.error}</p>{/if}
+        {/if}
+        {#if syncMsg}<p class="error pad" role="status">{syncMsg}</p>{/if}
+
         <div class="group">Look</div>
         <section class="setting">
           <div class="grow">Layout</div>
@@ -1012,6 +1095,48 @@
   }
 
   /* ---- settings */
+  .arrived {
+    position: absolute;
+    top: 6px;
+    left: 1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #22c55e;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .field {
+    min-width: 0;
+    padding: 6px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+  }
+  .pill {
+    flex: none;
+    padding: 5px 11px;
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--text);
+    font-size: 12.5px;
+  }
+  .pill:disabled {
+    opacity: 0.5;
+  }
+  .link {
+    align-self: flex-start;
+    color: var(--muted);
+    font-size: 12px;
+    text-decoration: underline;
+  }
   .settings {
     flex: 1;
     min-height: 0;
