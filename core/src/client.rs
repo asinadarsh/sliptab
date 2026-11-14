@@ -21,11 +21,10 @@ pub enum ClientError {
     SignedOut,
     /// Trial over and not paid.
     SubscriptionRequired,
-    WrongCode,
-    CodeExpired,
-    /// Codes are sent at most once a minute and five times an hour.
-    SlowDown,
-    InvalidEmail,
+    /// Google's sign-in token was refused (expired, or not for this app).
+    GoogleRejected,
+    /// The email already belongs to an Edge account linked to another Google account.
+    EmailTaken,
     Server(String),
 }
 
@@ -35,10 +34,8 @@ impl std::fmt::Display for ClientError {
             ClientError::Offline(_) => "You're offline. Notes will sync when you're back.",
             ClientError::SignedOut => "This device was signed out. Sign in again to sync.",
             ClientError::SubscriptionRequired => "Your trial has ended. Subscribe to keep syncing.",
-            ClientError::WrongCode => "That code is not right.",
-            ClientError::CodeExpired => "That code has expired. Ask for a new one.",
-            ClientError::SlowDown => "Please wait a minute before asking for another code.",
-            ClientError::InvalidEmail => "That email address doesn't look right.",
+            ClientError::GoogleRejected => "Google sign-in didn't go through. Please try again.",
+            ClientError::EmailTaken => "This email is already used by another Google account in Edge.",
             ClientError::Server(m) => return write!(f, "Sync server error: {m}"),
         })
     }
@@ -82,16 +79,10 @@ impl Client {
         Client { base: base.trim_end_matches('/').to_owned(), agent }
     }
 
-    /// Emails a sign-in code.
-    pub fn start_sign_in(&self, email: &str) -> Result<()> {
-        self.post::<serde::de::IgnoredAny>("/v1/auth/start", None, &serde_json::json!({ "email": email }))
-            .map(|_| ())
-    }
-
-    /// Exchanges the code for this device's session token.
-    pub fn verify(&self, email: &str, code: &str, device_name: &str) -> Result<String> {
-        let body = serde_json::json!({ "email": email, "code": code, "device_name": device_name });
-        Ok(self.post::<Verified>("/v1/auth/verify", None, &body)?.ok_or_else(|| server("empty answer"))?.token)
+    /// Exchanges a Google ID token for this device's session token.
+    pub fn sign_in_google(&self, id_token: &str, device_name: &str) -> Result<String> {
+        let body = serde_json::json!({ "id_token": id_token, "device_name": device_name });
+        Ok(self.post::<Verified>("/v1/auth/google", None, &body)?.ok_or_else(|| server("empty answer"))?.token)
     }
 
     pub fn me(&self, token: &str) -> Result<Me> {
@@ -175,12 +166,10 @@ fn read<T: serde::de::DeserializeOwned>(
     }
     let code = serde_json::from_str::<ErrorBody>(&text).map(|b| b.error).unwrap_or_default();
     Err(match (status, code.as_str()) {
-        (401, "wrong_code") => ClientError::WrongCode,
-        (401, "code_expired") => ClientError::CodeExpired,
+        (401, "google_rejected") => ClientError::GoogleRejected,
         (401, _) => ClientError::SignedOut,
         (402, _) => ClientError::SubscriptionRequired,
-        (429, _) => ClientError::SlowDown,
-        (400, "invalid_email") => ClientError::InvalidEmail,
+        (409, "email_taken") => ClientError::EmailTaken,
         (502..=504, _) => ClientError::Offline(format!("HTTP {status}")),
         _ => ClientError::Server(format!("HTTP {status} {code}")),
     })
