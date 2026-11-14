@@ -196,3 +196,39 @@ fn a_folder_change_and_a_text_edit_offline_merge_without_a_copy() {
     assert_eq!(saves[0].link.as_ref().unwrap().folder.as_deref(), Some("Watch Later"));
     assert!(saves[0].body.ends_with("for the talk"));
 }
+
+#[test]
+fn fields_from_a_newer_version_survive_an_older_device_editing_the_note() {
+    // A newer app wrote `reminder_at` on the note and `canonical` on its link. This version
+    // doesn't know either; it must keep them through storing, editing and syncing back.
+    let (mut phone, _, mut server) = devices();
+    let newer: Note = serde_json::from_value(serde_json::json!({
+        "id": Uuid::now_v7(), "title": "", "body": "https://www.threads.com/share/_oANR7c7l",
+        "pinned": false, "archived": false, "deleted_at": null, "created_at": 1, "updated_at": 1,
+        "device_id": "newer-laptop", "version": 1, "conflict_of": null, "color": null,
+        "reminder_at": 1794700000000_i64,
+        "link": { "url": "https://www.threads.com/share/_oANR7c7l", "platform": "threads",
+                  "canonical": "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv" }
+    }))
+    .unwrap();
+    server.sync(&SyncRequest { cursor: 0, changes: vec![notes_core::sync::Change { note: newer.clone(), base: None }] });
+    sync(&mut phone, &mut server);
+    phone.update_body(newer.id, "https://www.threads.com/share/_oANR7c7l  read later").unwrap();
+    sync(&mut phone, &mut server);
+    let stored = serde_json::to_value(&server.notes[&newer.id].0).unwrap();
+    assert_eq!(stored["reminder_at"], 1794700000000_i64);
+    assert_eq!(stored["link"]["canonical"], "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv");
+    assert!(stored["body"].as_str().unwrap().ends_with("read later"));
+}
+
+#[test]
+fn oversized_unknown_fields_from_a_device_are_dropped() {
+    let mut n: Note = serde_json::from_value(serde_json::json!({
+        "id": Uuid::now_v7(), "title": "", "body": "x", "pinned": false, "archived": false,
+        "deleted_at": null, "created_at": 1, "updated_at": 1, "device_id": "d", "version": 1,
+        "conflict_of": null, "color": null, "junk": "y".repeat(notes_core::MAX_EXTRA_BYTES), "small": 1
+    }))
+    .unwrap();
+    n.cap_extra();
+    assert!(n.extra.is_empty());
+}

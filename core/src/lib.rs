@@ -10,7 +10,7 @@ pub mod sync;
 pub mod client;
 
 pub use link::{clean_url, platform_of, Link};
-pub use note::{derive_title, valid_color, Note};
+pub use note::{derive_title, valid_color, Note, MAX_EXTRA_BYTES};
 #[cfg(feature = "store")]
 pub use store::Store;
 pub use uuid::Uuid;

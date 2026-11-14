@@ -4,7 +4,7 @@ use crate::link::Link;
 
 /// One note. Timestamps are milliseconds since the Unix epoch, taken from the device clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Note {
     /// UUIDv7, created on the device so offline notes never collide.
     pub id: Uuid,
@@ -26,8 +26,30 @@ pub struct Note {
     /// Tab colour on the screen edge, "#rrggbb". Kept when unpinned so re-pinning keeps the colour.
     pub color: Option<String>,
     /// Set when this note is a saved post (a save). Absent in notes from before saves existed.
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<Link>,
+    /// Fields from a newer version of Edge that this version does not know. Kept and sent back
+    /// unchanged, so an older app or server never strips what a newer one wrote.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Unknown fields from sync are kept, up to this many bytes of JSON per note and per link.
+pub const MAX_EXTRA_BYTES: usize = 16 * 1024;
+
+impl Note {
+    /// Drops unknown fields that are too big to be anything Edge wrote (from an untrusted device).
+    pub fn cap_extra(&mut self) {
+        let too_big = |m: &serde_json::Map<String, serde_json::Value>| {
+            !m.is_empty() && serde_json::to_string(m).map_or(true, |s| s.len() > MAX_EXTRA_BYTES)
+        };
+        if too_big(&self.extra) {
+            self.extra.clear();
+        }
+        if let Some(l) = self.link.as_mut().filter(|l| too_big(&l.extra)) {
+            l.extra.clear();
+        }
+    }
 }
 
 /// Accepts "#rrggbb" only, so a colour from sync or a hand-edited database can't inject CSS.

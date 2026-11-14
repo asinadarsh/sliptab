@@ -4,8 +4,8 @@
 /// What a saved post points at. Every field except `url` and `platform` is optional, so a save
 /// made offline or whose page could not be read still works.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(default))]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Link {
     /// Cleaned: tracking parameters removed, host normalised, so the same post saved twice matches.
     pub url: String,
@@ -24,6 +24,9 @@ pub struct Link {
     pub done: bool,
     /// Last time the original was opened from Edge.
     pub opened_at: Option<i64>,
+    /// Fields from a newer version, kept unchanged (see `Note::extra`).
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 const MAX_URL: usize = 2048;

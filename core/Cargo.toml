@@ -8,16 +8,18 @@ description = "Shared note model, local store, search and sync logic for Edge"
 [dependencies]
 # bundled: same SQLite (with FTS5) on every platform, including Android.
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
-uuid = { version = "1", features = ["v7"] }
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+uuid = { version = "1", features = ["v7", "serde"] }
+# Notes cross the network and the local database as JSON, so these are always on.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Bundled web roots, so TLS works the same on Android as on desktop.
 ureq = { version = "3", features = ["json"], optional = true }
 
 [features]
 # The local SQLite store. The sync server only needs the note model and sync rules.
 default = ["store"]
-store = ["dep:rusqlite", "serde", "dep:serde_json"]
+store = ["dep:rusqlite"]
 # HTTP client for the sync server, used by the apps.
-client = ["store", "serde", "dep:ureq", "dep:serde_json"]
-serde = ["dep:serde", "uuid/serde"]
+client = ["store", "dep:ureq"]
+# Kept so existing `features = ["serde"]` lines still resolve; serde is always on now.
+serde = []

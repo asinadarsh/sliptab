@@ -43,10 +43,13 @@ ALTER TABLE notes ADD COLUMN synced_meta INTEGER;
 "#, r#"
 -- Saved posts: JSON of `Link`, NULL for an ordinary note.
 ALTER TABLE notes ADD COLUMN link TEXT;
+"#, r#"
+-- Fields from newer versions of Edge, as a JSON object, kept so this version never strips them.
+ALTER TABLE notes ADD COLUMN extra TEXT;
 "#];
 
 const NOTE_COLUMNS: &str = "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
-                            device_id, version, conflict_of, color, link";
+                            device_id, version, conflict_of, color, link, extra";
 
 /// The local, offline-first note store. Every write lands here before any sync happens.
 pub struct Store {
@@ -91,6 +94,7 @@ impl Store {
             conflict_of: None,
             color: None,
             link: None,
+            extra: Default::default(),
         };
         let tx = self.conn.transaction()?;
         write(&tx, &note)?;
@@ -180,7 +184,7 @@ impl Store {
         note.version += 1;
         tx.execute(
             "UPDATE notes SET title=?2, body=?3, pinned=?4, archived=?5, deleted_at=?6, \
-             updated_at=?7, device_id=?8, version=?9, color=?10, link=?11 WHERE id=?1",
+             updated_at=?7, device_id=?8, version=?9, color=?10, link=?11, extra=?12 WHERE id=?1",
             params![
                 id.to_string(),
                 note.title,
@@ -193,6 +197,7 @@ impl Store {
                 note.version,
                 note.color,
                 link_json(&note),
+                extra_json(&note),
             ],
         )?;
         index_and_queue(&tx, &note, now)?;
@@ -263,11 +268,11 @@ impl Store {
         ))?;
         let changes = stmt
             .query_map([], |r| {
-                let base = match (r.get::<_, Option<i64>>(13)?, r.get::<_, Option<i64>>(14)?) {
+                let base = match (r.get::<_, Option<i64>>(14)?, r.get::<_, Option<i64>>(15)?) {
                     (Some(version), Some(h)) => Some(Base {
                         version,
                         body_hash: h as u64,
-                        meta_hash: r.get::<_, Option<i64>>(15)?.map(|m| m as u64),
+                        meta_hash: r.get::<_, Option<i64>>(16)?.map(|m| m as u64),
                     }),
                     _ => None,
                 };
@@ -348,9 +353,9 @@ fn get(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<Note>> {
 fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
-            "INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
+            "INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) \
              ON CONFLICT(id) DO UPDATE SET title=?2, body=?3, pinned=?4, archived=?5, deleted_at=?6, \
-             created_at=?7, updated_at=?8, device_id=?9, version=?10, conflict_of=?11, color=?12, link=?13"
+             created_at=?7, updated_at=?8, device_id=?9, version=?10, conflict_of=?11, color=?12, link=?13, extra=?14"
         ),
         params![
             n.id.to_string(),
@@ -366,6 +371,7 @@ fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
             n.conflict_of.map(|u| u.to_string()),
             n.color,
             link_json(n),
+            extra_json(n),
         ],
     )?;
     index(conn, n)
@@ -396,7 +402,12 @@ fn sanitize(mut n: Note) -> Note {
         n.color = None;
     }
     n.link = n.link.and_then(Link::sanitize);
+    n.cap_extra();
     n
+}
+
+fn extra_json(n: &Note) -> Option<String> {
+    (!n.extra.is_empty()).then(|| serde_json::to_string(&n.extra).expect("a JSON map always serialises"))
 }
 
 fn link_json(n: &Note) -> Option<String> {
@@ -444,6 +455,7 @@ fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
         color: r.get(11)?,
         // A link that does not parse (hand-edited or from a future version) leaves an ordinary note.
         link: r.get::<_, Option<String>>(12)?.and_then(|s| serde_json::from_str(&s).ok()),
+        extra: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
     })
 }
 

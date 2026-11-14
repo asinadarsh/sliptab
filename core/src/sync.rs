@@ -14,12 +14,12 @@ use crate::note::{derive_title, Note};
 
 /// The server state a device last saw for a note. None for a note made on this device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Base {
     pub version: i64,
     pub body_hash: u64,
     /// Hash of pinned, archived and colour. None from an older client: the later edit wins.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub meta_hash: Option<u64>,
 }
 
@@ -31,7 +31,7 @@ impl Base {
 
 /// One note a device changed, with the server state it started from.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Change {
     pub note: Note,
     pub base: Option<Base>,
@@ -39,7 +39,7 @@ pub struct Change {
 
 /// `POST /v1/sync` body: my changes, and the last server sequence number I have seen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SyncRequest {
     pub cursor: i64,
     pub changes: Vec<Change>,
@@ -48,12 +48,12 @@ pub struct SyncRequest {
 /// Every note stored after `cursor` (including the ones just sent, as the server merged them,
 /// and tombstones of deleted notes) and the new cursor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SyncResponse {
     pub cursor: i64,
     pub notes: Vec<Note>,
     /// The server sent a page, not everything: sync again straight away.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[serde(default)]
     pub more: bool,
 }
 
@@ -198,6 +198,7 @@ mod tests {
             conflict_of: None,
             color: None,
             link: None,
+            extra: Default::default(),
         }
     }
 
