@@ -243,6 +243,14 @@ pub fn run() {
             if probe_settings.show_bar || edge::backend() == "x11" {
                 window.show()?; // X11 hides the bar with an empty input shape instead of unmapping
             }
+            // Dev aid: open the panel as the hotkey would, so a screenshot can show it.
+            if cfg!(debug_assertions) && std::env::var_os("EDGE_OPEN_ON_START").is_some() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    let _ = tauri::Emitter::emit(&handle, hotkey::PRESSED_EVENT, ());
+                });
+            }
             if std::env::var_os("EDGE_PROBE").is_some() {
                 // Task 3 probe: did the window manager honour our position?
                 let w = window.clone();
