@@ -48,6 +48,9 @@ pub struct SyncRequest {
 pub struct SyncResponse {
     pub cursor: i64,
     pub notes: Vec<Note>,
+    /// The server sent a page, not everything: sync again straight away.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub more: bool,
 }
 
 /// Result of merging two versions of one note.

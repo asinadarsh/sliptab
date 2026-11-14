@@ -30,7 +30,7 @@ impl Server {
         }
         let mut notes: Vec<_> = self.notes.values().filter(|(_, s)| *s > req.cursor).cloned().collect();
         notes.sort_by_key(|(_, s)| *s);
-        SyncResponse { cursor: self.seq, notes: notes.into_iter().map(|(n, _)| n).collect() }
+        SyncResponse { cursor: self.seq, notes: notes.into_iter().map(|(n, _)| n).collect(), more: false }
     }
 }
 
