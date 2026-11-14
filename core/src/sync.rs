@@ -17,11 +17,14 @@ use crate::note::{derive_title, Note};
 pub struct Base {
     pub version: i64,
     pub body_hash: u64,
+    /// Hash of pinned, archived and colour. None from an older client: the later edit wins.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub meta_hash: Option<u64>,
 }
 
 impl Base {
     pub fn of(n: &Note) -> Self {
-        Base { version: n.version, body_hash: body_hash(&n.body) }
+        Base { version: n.version, body_hash: body_hash(&n.body), meta_hash: Some(meta_hash(n)) }
     }
 }
 
@@ -67,6 +70,11 @@ pub fn body_hash(body: &str) -> u64 {
     body.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
+/// The fields besides the text that a user sets: pin, archive and tab colour.
+pub fn meta_hash(n: &Note) -> u64 {
+    body_hash(&format!("{}|{}|{}", n.pinned, n.archived, n.color.as_deref().unwrap_or("")))
+}
+
 /// Merges `mine` and `theirs`, two versions of the same note that both started from `base`.
 /// The result is the same whichever side calls it (argument order only matters for which
 /// state is "mine" relative to `base`), so device and server agree.
@@ -84,11 +92,19 @@ pub fn merge(base: Option<Base>, mine: &Note, theirs: &Note) -> Merged {
         return Merged { note: later(mine, theirs).clone(), copy: None };
     }
 
-    // Both changed. Fields other than the body: the later edit wins.
+    // Both changed. Pin, archive and colour come from the side that changed them; if both did,
+    // the later edit wins.
     let newer = later(mine, theirs);
     let older = if std::ptr::eq(newer, mine) { theirs } else { mine };
     let mut note = newer.clone();
     note.version = mine.version.max(theirs.version) + 1;
+    let base_meta = base.and_then(|b| b.meta_hash);
+    let meta_from = match (base_meta != Some(meta_hash(mine)), base_meta != Some(meta_hash(theirs))) {
+        (true, false) => mine,
+        (false, true) => theirs,
+        _ => newer,
+    };
+    (note.pinned, note.archived, note.color) = (meta_from.pinned, meta_from.archived, meta_from.color.clone());
 
     let base_hash = base.map(|b| b.body_hash);
     let mine_changed = base_hash != Some(body_hash(&mine.body));
@@ -195,6 +211,23 @@ mod tests {
             assert_eq!(m.note.body, "milk and eggs");
             assert!(m.note.pinned);
             assert_eq!(m.note.version, 5);
+        }
+    }
+
+    #[test]
+    fn an_earlier_pin_survives_a_later_text_edit() {
+        let base = note("milk", 3, 10, "phone");
+        let mut pinned = base.clone();
+        pinned.pinned = true;
+        pinned.color = Some("#3b82f6".into());
+        pinned.version = 4;
+        pinned.updated_at = 15; // pinned first...
+        pinned.device_id = "laptop".into();
+        let edited = note("milk and eggs", 4, 20, "phone"); // ...text edited later
+        for (a, b) in [(&pinned, &edited), (&edited, &pinned)] {
+            let m = merge(Some(Base::of(&base)), a, b);
+            assert_eq!((m.note.body.as_str(), m.note.pinned), ("milk and eggs", true));
+            assert_eq!(m.note.color.as_deref(), Some("#3b82f6"));
         }
     }
 

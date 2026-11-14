@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use crate::note::{derive_title, valid_color, Note};
-use crate::sync::{body_hash, merge, Base, Change, SyncRequest, SyncResponse};
+use crate::sync::{body_hash, merge, meta_hash, Base, Change, SyncRequest, SyncResponse};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
 const MIGRATIONS: &[&str] = &[r#"
@@ -37,6 +37,8 @@ ALTER TABLE notes ADD COLUMN color TEXT;
 ALTER TABLE notes ADD COLUMN synced_version INTEGER;
 ALTER TABLE notes ADD COLUMN synced_hash INTEGER;
 CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+"#, r#"
+ALTER TABLE notes ADD COLUMN synced_meta INTEGER;
 "#];
 
 const NOTE_COLUMNS: &str = "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
@@ -202,13 +204,17 @@ impl Store {
     pub fn sync_request(&self) -> rusqlite::Result<SyncRequest> {
         let cols = NOTE_COLUMNS.split(", ").map(|c| format!("n.{c}")).collect::<Vec<_>>().join(", ");
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {cols}, n.synced_version, n.synced_hash FROM sync_queue q JOIN notes n ON n.id = q.note_id \
+            "SELECT {cols}, n.synced_version, n.synced_hash, n.synced_meta FROM sync_queue q JOIN notes n ON n.id = q.note_id \
              ORDER BY q.queued_at, q.note_id"
         ))?;
         let changes = stmt
             .query_map([], |r| {
                 let base = match (r.get::<_, Option<i64>>(12)?, r.get::<_, Option<i64>>(13)?) {
-                    (Some(version), Some(h)) => Some(Base { version, body_hash: h as u64 }),
+                    (Some(version), Some(h)) => Some(Base {
+                        version,
+                        body_hash: h as u64,
+                        meta_hash: r.get::<_, Option<i64>>(14)?.map(|m| m as u64),
+                    }),
                     _ => None,
                 };
                 Ok(Change { note: note_from_row(r)?, base })
@@ -223,10 +229,7 @@ impl Store {
         let tx = self.conn.transaction()?;
         for c in &sent.changes {
             // The server now holds what we sent: that is our new base, even if it merged it.
-            tx.execute(
-                "UPDATE notes SET synced_version = ?2, synced_hash = ?3 WHERE id = ?1",
-                params![c.note.id.to_string(), c.note.version, body_hash(&c.note.body) as i64],
-            )?;
+            set_synced(&tx, &c.note)?;
             tx.execute(
                 "DELETE FROM sync_queue WHERE note_id = ?1 AND \
                  (SELECT version FROM notes WHERE id = ?1) = ?2",
@@ -253,10 +256,7 @@ impl Store {
                 }
                 _ => write(&tx, &remote)?,
             }
-            tx.execute(
-                "UPDATE notes SET synced_version = ?2, synced_hash = ?3 WHERE id = ?1",
-                params![remote.id.to_string(), remote.version, body_hash(&remote.body) as i64],
-            )?;
+            set_synced(&tx, &remote)?;
         }
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('cursor', ?1) \
@@ -316,13 +316,22 @@ fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
     index(conn, n)
 }
 
+/// Records `n` as the server state this device has seen for that note.
+fn set_synced(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE notes SET synced_version = ?2, synced_hash = ?3, synced_meta = ?4 WHERE id = ?1",
+        params![n.id.to_string(), n.version, body_hash(&n.body) as i64, meta_hash(n) as i64],
+    )?;
+    Ok(())
+}
+
 fn synced_base(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<Base>> {
     conn.query_row(
-        "SELECT synced_version, synced_hash FROM notes WHERE id = ?1",
+        "SELECT synced_version, synced_hash, synced_meta FROM notes WHERE id = ?1",
         [id.to_string()],
-        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)),
     )
-    .map(|(v, h)| Some(Base { version: v?, body_hash: h? as u64 }))
+    .map(|(v, h, m)| Some(Base { version: v?, body_hash: h? as u64, meta_hash: m.map(|m| m as u64) }))
 }
 
 /// Notes from the network are untrusted: the title is rederived and a bad colour dropped.

@@ -90,8 +90,9 @@ fn pin_on_laptop_and_edit_on_phone_merge_without_a_copy() {
     let (mut phone, mut laptop, mut server) = devices();
     let n = phone.create("milk").unwrap();
     settle(&mut phone, &mut laptop, &mut server);
-    phone.update_body(n.id, "milk and eggs").unwrap();
     laptop.set_pinned(n.id, true).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2)); // the text edit is the later one
+    phone.update_body(n.id, "milk and eggs").unwrap();
     settle(&mut phone, &mut laptop, &mut server);
     assert_eq!(view(&phone), vec![("milk and eggs".to_string(), true, None)]);
 }
