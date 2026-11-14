@@ -36,7 +36,8 @@ const RULES: &[(&str, &[&str])] = &[
         "learn", "learning", "tutorial", "course", "lesson", "guide", "explained", "explainer", "study",
         "coding", "code", "python", "javascript", "programming", "developer", "ai", "chatgpt", "claude", "llm",
         "excel", "english", "science", "history", "chess", "tips", "tricks", "how to", "step by step",
-        "did you know", "open sourced", "design system",
+        "did you know", "open sourced", "design system", "website", "websites", "tool", "tools", "resources",
+        "prompt", "prompts", "vibecoding", "vibecoder", "level up",
     ]),
     ("Ideas", &[
         "idea", "ideas", "inspiration", "inspo", "diy", "design", "aesthetic", "decor", "hack", "hacks",
@@ -48,8 +49,8 @@ const RULES: &[(&str, &[&str])] = &[
     ]),
 ];
 
-/// The folder these words point at, or a default by platform: videos to Watch Later, articles
-/// to Read Later. None leaves the save Unsorted.
+/// The folder these words point at, or a default by platform: videos to Watch Later, posts and
+/// articles to Read Later. None (no words and an unknown platform) leaves the save Unsorted.
 pub fn suggest_folder(platform: &str, words: &[&str]) -> Option<&'static str> {
     let text = words.join("\n").to_lowercase();
     let tokens: Vec<&str> = text
@@ -76,7 +77,7 @@ pub fn suggest_folder(platform: &str, words: &[&str]) -> Option<&'static str> {
     }
     best.map(|(f, _)| f).or(match platform {
         "youtube" | "instagram" => Some("Watch Later"),
-        "web" => Some("Read Later"),
+        "web" | "x" | "threads" => Some("Read Later"),
         _ => None,
     })
 }
@@ -97,7 +98,9 @@ mod tests {
             ("instagram", &["This kurta is under Rs. 499 on Myntra, link in bio"], Some("Buy Later")),
             ("x", &["me after one meeting 😂"], Some("Funny")),
             ("web", &["Top 10 Pocket Alternatives in 2026"], Some("Read Later")),
-            ("x", &["gm"], None),
+            ("x", &["gm"], Some("Read Later")),
+            ("threads", &["5 Websites Every Vibecoder Should Know 💻 Build better websites, find ideas. 1. Startup ideas"], Some("Learn")),
+            ("other", &["gm"], None),
         ];
         for (platform, words, want) in cases {
             assert_eq!(suggest_folder(platform, words), *want, "{words:?}");
@@ -107,7 +110,7 @@ mod tests {
     #[test]
     fn single_words_match_whole_words_only() {
         // "ai" must not match inside "said", nor "mistake" count as anything.
-        assert_eq!(suggest_folder("x", &["he said it was a mistake"]), None);
+        assert_eq!(suggest_folder("other", &["he said it was a mistake"]), None);
         assert_eq!(suggest_folder("x", &["new AI tools"]), Some("Learn"));
     }
 

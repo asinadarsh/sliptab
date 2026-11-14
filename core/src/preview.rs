@@ -38,8 +38,10 @@ pub fn parse_html(platform: &str, final_url: &str, html: &str) -> Preview {
     let get = |k: &str| tags.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_owned);
     let page_title = title_tag(html);
     let thumbnail = get("og:image").or_else(|| get("twitter:image")).filter(|u| u.starts_with("https://"));
-    let canonical = get("og:url")
-        .or_else(|| canonical_link(html))
+    // rel=canonical first: Instagram's og:url adds the username (/user/reel/id), while its
+    // canonical is the /reel/id form that shares use, so a repeated share still matches.
+    let canonical = canonical_link(html)
+        .or_else(|| get("og:url"))
         .or_else(|| (final_url.starts_with("http")).then(|| final_url.to_owned()));
 
     let mut p = match platform {
@@ -270,7 +272,7 @@ mod tests {
         assert_eq!(p.title.as_deref(), Some("#chess #chessplayer #explore #reels #fyp"));
         assert_eq!(p.author.as_deref(), Some("@saakshi.chess"));
         assert!(p.thumbnail.unwrap().starts_with("https://scontent.cdninstagram.com/"));
-        assert_eq!(p.canonical.as_deref(), Some("https://www.instagram.com/saakshi.chess/reel/DftSYUwtKNT/"));
+        assert_eq!(p.canonical.as_deref(), Some("https://www.instagram.com/reel/DftSYUwtKNT/"));
     }
 
     #[test]

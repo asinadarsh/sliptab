@@ -23,3 +23,7 @@ store = ["dep:rusqlite"]
 client = ["store", "dep:ureq"]
 # Kept so existing `features = ["serde"]` lines still resolve; serde is always on now.
 serde = []
+
+[[example]]
+name = "preview"
+required-features = ["client"]
