@@ -5,6 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
 use crate::note::{derive_title, valid_color, Note};
+use crate::sync::{body_hash, merge, Base, Change, SyncRequest, SyncResponse};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
 const MIGRATIONS: &[&str] = &[r#"
@@ -31,6 +32,11 @@ CREATE TABLE sync_queue (
 );
 "#, r#"
 ALTER TABLE notes ADD COLUMN color TEXT;
+"#, r#"
+-- The server state this device last saw for each note (NULL: never synced), for merging.
+ALTER TABLE notes ADD COLUMN synced_version INTEGER;
+ALTER TABLE notes ADD COLUMN synced_hash INTEGER;
+CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
 "#];
 
 const NOTE_COLUMNS: &str = "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
@@ -192,6 +198,81 @@ impl Store {
         rows.collect()
     }
 
+    /// What to send to `/v1/sync`: every queued note with the server state it started from.
+    pub fn sync_request(&self) -> rusqlite::Result<SyncRequest> {
+        let cols = NOTE_COLUMNS.split(", ").map(|c| format!("n.{c}")).collect::<Vec<_>>().join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {cols}, n.synced_version, n.synced_hash FROM sync_queue q JOIN notes n ON n.id = q.note_id \
+             ORDER BY q.queued_at, q.note_id"
+        ))?;
+        let changes = stmt
+            .query_map([], |r| {
+                let base = match (r.get::<_, Option<i64>>(12)?, r.get::<_, Option<i64>>(13)?) {
+                    (Some(version), Some(h)) => Some(Base { version, body_hash: h as u64 }),
+                    _ => None,
+                };
+                Ok(Change { note: note_from_row(r)?, base })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(SyncRequest { cursor: self.cursor()?, changes })
+    }
+
+    /// Applies the server's answer to `sent`, in one transaction. Notes edited while the request
+    /// was in flight stay queued and are merged, so nothing typed during a sync is lost.
+    pub fn apply_sync(&mut self, sent: &SyncRequest, resp: &SyncResponse) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        for c in &sent.changes {
+            // The server now holds what we sent: that is our new base, even if it merged it.
+            tx.execute(
+                "UPDATE notes SET synced_version = ?2, synced_hash = ?3 WHERE id = ?1",
+                params![c.note.id.to_string(), c.note.version, body_hash(&c.note.body) as i64],
+            )?;
+            tx.execute(
+                "DELETE FROM sync_queue WHERE note_id = ?1 AND \
+                 (SELECT version FROM notes WHERE id = ?1) = ?2",
+                params![c.note.id.to_string(), c.note.version],
+            )?;
+        }
+        for remote in &resp.notes {
+            let remote = sanitize(remote.clone());
+            let queued: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_queue WHERE note_id = ?1)",
+                [remote.id.to_string()],
+                |r| r.get(0),
+            )?;
+            let local = get(&tx, remote.id)?;
+            match local {
+                Some(local) if queued => {
+                    let base = synced_base(&tx, remote.id)?;
+                    let merged = merge(base, &local, &remote);
+                    write(&tx, &merged.note)?;
+                    if let Some(copy) = merged.copy {
+                        write(&tx, &copy)?;
+                        queue(&tx, copy.id, now_ms())?;
+                    }
+                }
+                _ => write(&tx, &remote)?,
+            }
+            tx.execute(
+                "UPDATE notes SET synced_version = ?2, synced_hash = ?3 WHERE id = ?1",
+                params![remote.id.to_string(), remote.version, body_hash(&remote.body) as i64],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('cursor', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [resp.cursor.max(sent.cursor)],
+        )?;
+        tx.commit()
+    }
+
+    fn cursor(&self) -> rusqlite::Result<i64> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| r.get(0))
+            .optional()
+            .map(|c| c.unwrap_or(0))
+    }
+
     /// IDs of notes changed since the last successful sync, oldest change first.
     pub fn pending_sync(&self) -> rusqlite::Result<Vec<Uuid>> {
         let mut stmt = self.conn.prepare("SELECT note_id FROM sync_queue ORDER BY queued_at, note_id")?;
@@ -209,13 +290,67 @@ fn get(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<Note>> {
     .optional()
 }
 
+/// Inserts or replaces a note and reindexes it, without queueing it for sync.
+fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!(
+            "INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
+             ON CONFLICT(id) DO UPDATE SET title=?2, body=?3, pinned=?4, archived=?5, deleted_at=?6, \
+             created_at=?7, updated_at=?8, device_id=?9, version=?10, conflict_of=?11, color=?12"
+        ),
+        params![
+            n.id.to_string(),
+            n.title,
+            n.body,
+            n.pinned,
+            n.archived,
+            n.deleted_at,
+            n.created_at,
+            n.updated_at,
+            n.device_id,
+            n.version,
+            n.conflict_of.map(|u| u.to_string()),
+            n.color,
+        ],
+    )?;
+    index(conn, n)
+}
+
+fn synced_base(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<Base>> {
+    conn.query_row(
+        "SELECT synced_version, synced_hash FROM notes WHERE id = ?1",
+        [id.to_string()],
+        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+    )
+    .map(|(v, h)| Some(Base { version: v?, body_hash: h? as u64 }))
+}
+
+/// Notes from the network are untrusted: the title is rederived and a bad colour dropped.
+fn sanitize(mut n: Note) -> Note {
+    n.title = derive_title(&n.body);
+    if n.color.as_deref().is_some_and(|c| !valid_color(c)) {
+        n.color = None;
+    }
+    n
+}
+
 fn index_and_queue(conn: &Connection, note: &Note, now: i64) -> rusqlite::Result<()> {
+    index(conn, note)?;
+    queue(conn, note.id, now)
+}
+
+fn index(conn: &Connection, note: &Note) -> rusqlite::Result<()> {
     let id = note.id.to_string();
     conn.execute("DELETE FROM notes_fts WHERE note_id = ?1", [&id])?;
     conn.execute(
         "INSERT INTO notes_fts (note_id, title, body) VALUES (?1, ?2, ?3)",
         params![id, note.title, note.body],
     )?;
+    Ok(())
+}
+
+fn queue(conn: &Connection, id: Uuid, now: i64) -> rusqlite::Result<()> {
+    let id = id.to_string();
     conn.execute(
         "INSERT INTO sync_queue (note_id, queued_at) VALUES (?1, ?2) \
          ON CONFLICT(note_id) DO UPDATE SET queued_at = excluded.queued_at",
