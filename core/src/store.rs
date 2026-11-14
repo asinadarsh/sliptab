@@ -145,6 +145,61 @@ impl Store {
         self.edit_link(id, |l| l.opened_at = Some(now))
     }
 
+    /// Which saves to bring back on each of the next `days` days, `per_day` a day. `today_start`
+    /// is local midnight in ms (the apps know the time zone). A save that is 7 days old and was
+    /// never opened leads its day; the rest are the least looked-at saves, oldest first, with no
+    /// save repeated in the plan until all have had a turn. Done saves and saves less than a day
+    /// old are left out.
+    pub fn digest_plan(&self, today_start: i64, days: usize, per_day: usize) -> rusqlite::Result<Vec<Vec<Note>>> {
+        const DAY: i64 = 86_400_000;
+        let mut pool: Vec<Note> = self
+            .saves()?
+            .into_iter()
+            .filter(|n| n.link.as_ref().is_some_and(|l| !l.done))
+            .collect();
+        pool.sort_by_key(|n| (n.link.as_ref().and_then(|l| l.opened_at).unwrap_or(0), n.created_at));
+        let mut used = std::collections::HashSet::new();
+        let mut plan = Vec::with_capacity(days);
+        for d in 0..days as i64 {
+            let start = today_start + d * DAY;
+            let ready: Vec<&Note> = pool.iter().filter(|n| n.created_at < start - DAY).collect();
+            let mut day: Vec<Note> = Vec::new();
+            if let Some(n) = ready.iter().find(|n| {
+                n.created_at >= start - 7 * DAY && n.created_at < start - 6 * DAY // saved on this weekday last week && n.link.as_ref().is_some_and(|l| l.opened_at.is_none())
+            }) {
+                used.insert(n.id);
+                day.push((*n).clone());
+            }
+            if ready.iter().all(|n| used.contains(&n.id)) {
+                used.retain(|id| day.iter().any(|n| n.id == *id)); // everyone had a turn: start over
+            }
+            for n in &ready {
+                if day.len() >= per_day.min(ready.len()) {
+                    break;
+                }
+                if used.insert(n.id) {
+                    day.push((*n).clone());
+                }
+            }
+            plan.push(day);
+        }
+        Ok(plan)
+    }
+
+    /// A random save that is not done, for "surprise me".
+    pub fn random_save(&self) -> rusqlite::Result<Option<Note>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {NOTE_COLUMNS} FROM notes WHERE archived = 0 AND deleted_at IS NULL AND link IS NOT NULL \
+                     AND NOT COALESCE(json_extract(link, '$.done'), 0) ORDER BY random() LIMIT 1"
+                ),
+                [],
+                note_from_row,
+            )
+            .optional()
+    }
+
     /// Saves whose details have not been fetched yet and are due (not waiting after a failure),
     /// oldest first.
     pub fn saves_needing_details(&self, limit: usize) -> rusqlite::Result<Vec<Note>> {
@@ -648,6 +703,46 @@ mod tests {
         assert_eq!(s.list().unwrap()[0].body, "old");
         assert!(s.create_save("https://example.com/a").unwrap().1);
         std::fs::remove_file(&path).ok();
+    }
+
+    const DAY: i64 = 86_400_000;
+
+    /// A save made `days_ago` days before `now`.
+    fn aged_save(s: &mut Store, url: &str, now: i64, days_ago: i64) -> Uuid {
+        let (n, _) = s.create_save(url).unwrap();
+        s.conn.execute("UPDATE notes SET created_at = ?2 WHERE id = ?1", params![n.id.to_string(), now - days_ago * DAY]).unwrap();
+        n.id
+    }
+
+    #[test]
+    fn the_digest_brings_back_old_unopened_saves_and_leads_with_the_week_old_one() {
+        let mut s = store();
+        let today = 100 * DAY;
+        let old = aged_save(&mut s, "https://x.com/a/status/1", today, 30);
+        let opened = aged_save(&mut s, "https://x.com/a/status/2", today, 20);
+        let week = aged_save(&mut s, "https://x.com/a/status/3", today, 7);
+        let done = aged_save(&mut s, "https://x.com/a/status/4", today, 10);
+        let fresh = aged_save(&mut s, "https://x.com/a/status/5", today, 0);
+        let mid = aged_save(&mut s, "https://x.com/a/status/6", today, 3);
+        s.mark_opened(opened).unwrap();
+        s.set_save_done(done, true).unwrap();
+        let plan = s.digest_plan(today, 3, 3).unwrap();
+        let ids = |d: &Vec<Note>| d.iter().map(|n| n.id).collect::<Vec<_>>();
+        assert_eq!(ids(&plan[0]), vec![week, old, mid], "week-old first, then never opened, oldest first");
+        assert!(!plan.iter().flatten().any(|n| n.id == done), "never a done save");
+        assert!(!plan[0].iter().chain(&plan[1]).any(|n| n.id == fresh), "a save waits a day before it comes back");
+        assert!(plan[2].iter().any(|n| n.id == fresh));
+        // Day two: the opened one gets its turn before anyone repeats.
+        assert_eq!(plan[1][0].id, opened);
+        assert_eq!(s.digest_plan(today, 1, 3).unwrap()[0].len(), 3);
+        assert!(s.random_save().unwrap().is_some_and(|n| n.id != done));
+    }
+
+    #[test]
+    fn an_empty_library_has_an_empty_digest() {
+        let s = store();
+        assert_eq!(s.digest_plan(0, 2, 3).unwrap(), vec![vec![], vec![]]);
+        assert!(s.random_save().unwrap().is_none());
     }
 
     fn preview(title: &str, canonical: Option<&str>) -> Preview {
