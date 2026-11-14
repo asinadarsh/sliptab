@@ -122,6 +122,12 @@ impl Store {
         self.edit(id, |n| n.color = color.map(str::to_owned))
     }
 
+    /// Soft delete: the note disappears from list and search but stays as a tombstone, so sync
+    /// can tell other devices it was deleted.
+    pub fn delete(&mut self, id: Uuid) -> rusqlite::Result<Note> {
+        self.edit(id, |n| n.deleted_at = Some(now_ms()))
+    }
+
     /// Every edit bumps `version`, stamps time and device, reindexes and queues for sync.
     fn edit(&mut self, id: Uuid, change: impl FnOnce(&mut Note)) -> rusqlite::Result<Note> {
         let tx = self.conn.transaction()?;
@@ -311,6 +317,18 @@ mod tests {
         let mut s = store();
         let err = s.update_body(Uuid::now_v7(), "x").unwrap_err();
         assert!(matches!(err, rusqlite::Error::QueryReturnedNoRows));
+    }
+
+    #[test]
+    fn deleted_notes_leave_list_and_search_but_stay_queued() {
+        let mut s = store();
+        let n = s.create("Old idea").unwrap();
+        let gone = s.delete(n.id).unwrap();
+        assert!(gone.deleted_at.is_some());
+        assert_eq!(gone.version, n.version + 1);
+        assert!(s.list().unwrap().is_empty());
+        assert!(s.search("idea").unwrap().is_empty());
+        assert_eq!(s.pending_sync().unwrap(), vec![n.id]);
     }
 
     #[test]
