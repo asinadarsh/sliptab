@@ -51,9 +51,6 @@ pub fn status(app: &AppHandle) -> Status {
 }
 
 fn set_status(app: &AppHandle, status: Status) {
-    if cfg!(debug_assertions) {
-        eprintln!("hotkey status: {status:?}");
-    }
     if let Ok(mut s) = app.state::<Hotkey>().status.lock() {
         *s = status.clone();
     }
@@ -213,9 +210,6 @@ mod portal {
 
         let mut activated = portal.receive_activated().await?;
         while let Some(a) = activated.next().await {
-            if cfg!(debug_assertions) {
-                eprintln!("hotkey activated: {}", a.shortcut_id());
-            }
             if a.shortcut_id() == id {
                 let _ = app.emit(PRESSED_EVENT, ());
             }

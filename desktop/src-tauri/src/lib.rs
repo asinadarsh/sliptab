@@ -25,12 +25,14 @@ struct AppSettings {
 struct EdgeState {
     expanded: AtomicBool,
     tabs: AtomicUsize,
+    peek: Mutex<Option<edge::Local>>,
 }
 
 impl EdgeState {
     fn place(&self, window: &WebviewWindow, s: &settings::Settings) -> CmdResult<()> {
         let (expanded, tabs) = (self.expanded.load(Ordering::Relaxed), self.tabs.load(Ordering::Relaxed));
-        edge::place(window, expanded, s, tabs).map(|_| ()).map_err(|e| e.to_string())
+        let peek = *self.peek.lock().map_err(|e| e.to_string())?;
+        edge::place(window, expanded, s, tabs, peek).map(|_| ()).map_err(|e| e.to_string())
     }
 }
 
@@ -88,6 +90,9 @@ fn set_expanded(
     if expanded && focus {
         window.set_focus().map_err(|e| e.to_string())?;
     }
+    if !expanded && window.is_focused().unwrap_or(false) {
+        edge::release_focus(&window).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -95,8 +100,8 @@ fn set_expanded(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Platform {
-    /// GNOME/XWayland loses the pointer once it moves onto a Wayland window, so "mouse left" can be
-    /// missed. There the panel takes focus when it opens and also closes on blur.
+    /// Hover no longer takes keyboard focus anywhere: GTK's own crossings make mouse-out reliable,
+    /// and focusing on hover sent typing into the panel after it had closed.
     focus_on_hover: bool,
     /// X11: the window never resizes (only its input shape changes), so the panel can start sliding
     /// before Rust has answered. Elsewhere the window must grow first.
@@ -108,7 +113,7 @@ struct Platform {
 fn platform() -> Platform {
     let x11 = cfg!(target_os = "linux") && edge::backend() == "x11";
     Platform {
-        focus_on_hover: x11 && std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        focus_on_hover: false,
         fixed_window: x11,
         os: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
     }
@@ -130,6 +135,12 @@ fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String)
     Ok(status)
 }
 
+/// Clicking a dock window does not focus it on GNOME, so the panel asks when you click in it.
+#[tauri::command]
+fn focus_panel(window: WebviewWindow) -> CmdResult<()> {
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 /// The page reports how many tabs it draws, so the window/input area matches the strip.
 #[tauri::command]
 fn set_tab_count(window: WebviewWindow, s: State<AppSettings>, state: State<EdgeState>, count: usize) -> CmdResult<()> {
@@ -137,6 +148,18 @@ fn set_tab_count(window: WebviewWindow, s: State<AppSettings>, state: State<Edge
         state.place(&window, &current_settings(&s)?)?;
     }
     Ok(())
+}
+
+/// The hovered tab's preview card (None when hidden), so it can take clicks while collapsed.
+#[tauri::command]
+fn set_peek(window: WebviewWindow, s: State<AppSettings>, state: State<EdgeState>, rect: Option<edge::Local>) -> CmdResult<()> {
+    let mut peek = state.peek.lock().map_err(|e| e.to_string())?;
+    if *peek == rect {
+        return Ok(());
+    }
+    *peek = rect;
+    drop(peek);
+    state.place(&window, &current_settings(&s)?)
 }
 
 #[tauri::command]
@@ -160,27 +183,6 @@ fn save_settings(
     };
     state.place(&window, &saved)?;
     Ok(saved)
-}
-
-/// Live resize while the user drags the panel edge; `save` on release only, to spare the disk.
-#[tauri::command]
-fn set_panel_width(
-    window: WebviewWindow,
-    s: State<AppSettings>,
-    state: State<EdgeState>,
-    width: f64,
-    save: bool,
-) -> CmdResult<()> {
-    let snapshot = {
-        let mut current = s.current.lock().map_err(|e| e.to_string())?;
-        current.panel_width = Some(width.max(edge::PANEL_MIN_WIDTH));
-        if save {
-            settings::save(&s.dir, &current).map_err(|e| e.to_string())?;
-        }
-        current.clone()
-    };
-    edge::place(&window, true, &snapshot, state.tabs.load(Ordering::Relaxed)).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 #[tauri::command]
@@ -236,7 +238,7 @@ pub fn run() {
                 eprintln!("hotkey: {e}"); // shown in settings via get_hotkey's error
             }
             let window = app.get_webview_window("main").expect("main window is declared in tauri.conf.json");
-            let placed = edge::place(&window, false, &loaded, 0)?;
+            let placed = edge::place(&window, false, &loaded, 0, None)?;
             let probe_settings = loaded.clone();
             app.manage(AppSettings { dir: dir.clone(), current: Mutex::new(loaded) });
             edge::forward_pointer_crossings(&window)?;
@@ -249,6 +251,10 @@ pub fn run() {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(1500));
                     let _ = tauri::Emitter::emit(&handle, hotkey::PRESSED_EVENT, ());
+                    if std::env::var("EDGE_OPEN_ON_START").as_deref() == Ok("toggle") {
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        let _ = tauri::Emitter::emit(&handle, hotkey::PRESSED_EVENT, ());
+                    }
                 });
             }
             if std::env::var_os("EDGE_PROBE").is_some() {
@@ -270,7 +276,7 @@ pub fn run() {
                         let w2 = w.clone();
                         let ps = probe_settings.clone();
                         let _ = w.run_on_main_thread(move || {
-                            let _ = tx.send(edge::place(&w2, expanded, &ps, 0).ok().flatten());
+                            let _ = tx.send(edge::place(&w2, expanded, &ps, 0, None).ok().flatten());
                         });
                         let r = rx.recv().ok().flatten();
                         std::thread::sleep(std::time::Duration::from_millis(800));
@@ -292,6 +298,8 @@ pub fn run() {
             note_set_pinned,
             note_set_color,
             set_tab_count,
+            focus_panel,
+            set_peek,
             set_expanded,
             debug_log,
             platform,
@@ -299,7 +307,6 @@ pub fn run() {
             set_hotkey,
             get_settings,
             save_settings,
-            set_panel_width,
             get_autostart,
             set_autostart
         ])
