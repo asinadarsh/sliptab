@@ -4,7 +4,7 @@
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
   import { captureHotkey, formatHotkey } from "$lib/accel";
-  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note } from "$lib/notes";
+  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note, isOnlyLink, platformName, saveTitle, PLATFORMS } from "$lib/notes";
   import Cards from "$lib/views/Cards.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Sticky from "$lib/views/Sticky.svelte";
@@ -28,6 +28,9 @@
   let all: Note[] = $state([]); // every visible note, for the edge tabs
   let notes: Note[] = $state([]); // what the list shows (search results while searching)
   let query = $state("");
+  let tab: "notes" | "saved" = $state("notes");
+  let allSaves: Note[] = $state([]);
+  let saves: Note[] = $state([]); // what the Saved list shows (search results while searching)
   let selectedId: string | null = $state(null);
   let editing: Note | null = $state(null);
   let draft = $state("");
@@ -216,7 +219,9 @@
   // ---- notes
   async function refresh() {
     all = await invoke<Note[]>("notes_list");
-    notes = query.trim() ? await invoke<Note[]>("notes_search", { query }) : all;
+    notes = query.trim() && tab === "notes" ? await invoke<Note[]>("notes_search", { query }) : all;
+    allSaves = await invoke<Note[]>("saves_list");
+    saves = query.trim() && tab === "saved" ? await invoke<Note[]>("saves_search", { query }) : allSaves;
     if (!flat.some((n) => n.id === selectedId)) selectedId = flat[0]?.id ?? null;
   }
 
@@ -251,8 +256,32 @@
   async function addQuick() {
     const body = quick.trim();
     if (!body) return;
-    await invoke("note_create", { body });
+    if (isOnlyLink(body)) {
+      await invoke("save_create", { text: body });
+      tab = "saved";
+    } else {
+      await invoke("note_create", { body });
+    }
     quick = "";
+    await refresh();
+  }
+
+  function showTab(t: typeof tab) {
+    tab = t;
+    void refresh();
+  }
+
+  async function openSave(n: Note) {
+    try {
+      const updated = await invoke<Note>("save_open", { id: n.id });
+      saves = saves.map((x) => (x.id === n.id ? updated : x));
+    } catch (e) {
+      log(`open save: ${e}`);
+    }
+  }
+
+  async function deleteSave(n: Note) {
+    await invoke("note_delete", { id: n.id });
     await refresh();
   }
 
@@ -440,7 +469,7 @@
       else edge.escape();
       return;
     }
-    if (editing || settingsOpen || document.activeElement === quickEl) return;
+    if (editing || settingsOpen || tab === "saved" || document.activeElement === quickEl) return;
     const i = flat.findIndex((n) => n.id === selectedId);
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -506,13 +535,17 @@
         bind:this={searchEl}
         bind:value={query}
         oninput={() => void refresh()}
-        placeholder="Search {all.length} notes"
-        aria-label="Search notes"
+        placeholder={tab === "saved" ? `Search ${allSaves.length} saves` : `Search ${all.length} notes`}
+        aria-label={tab === "saved" ? "Search saves" : "Search notes"}
       />
     </div>
     <button class="ib" onclick={openSettings} aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
     <button class="ib" onclick={() => edge.escape()} aria-label="Close panel" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </header>
+  <nav class="tabs" aria-label="Notes or saved posts">
+    <button class:on={tab === "notes"} onclick={() => showTab("notes")}>Notes</button>
+    <button class:on={tab === "saved"} onclick={() => showTab("saved")}>Saved{#if allSaves.length}<span>{allSaves.length}</span>{/if}</button>
+  </nav>
 {/snippet}
 
 {#snippet capture(variant: "big" | "slim" | "tile")}
@@ -527,7 +560,7 @@
           void addQuick();
         }
       }}
-      placeholder={variant === "slim" ? "+ New note" : variant === "tile" ? "+ New note" : "Write a thought…"}
+      placeholder={tab === "saved" ? "Paste a link to save it" : variant === "slim" ? "+ New note" : variant === "tile" ? "+ New note" : "Write a thought…"}
       aria-label="New note"
     ></textarea>
     {#if variant !== "slim"}
@@ -715,6 +748,27 @@
         </div>
       {/if}
       <textarea class="editor" bind:this={editorEl} bind:value={draft} oninput={scheduleSave} spellcheck="true"></textarea>
+    {:else if tab === "saved"}
+      {@render header()}
+      <div class="saves">
+        {#each saves as n (n.id)}
+          {@const l = n.link!}
+          {@const p = PLATFORMS[l.platform]}
+          <div class="save" data-id={n.id}>
+            <button class="open" onclick={() => openSave(n)} title="Open in {platformName(l)}">
+              <span class="mark" class:mono={p?.color === "#101010"} style:--c={p?.color ?? "var(--accent)"}>{p?.mark ?? "↗"}</span>
+              <span class="body">
+                <span class="st">{saveTitle(n)}</span>
+                <span class="meta">{platformName(l)}{l.author ? ` · ${l.author}` : ""} · {ago(n.created_at)}{l.opened_at ? " · opened" : ""}</span>
+              </span>
+            </button>
+            <button class="ib del" onclick={() => deleteSave(n)} aria-label="Delete save" title="Delete"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+          </div>
+        {:else}
+          <div class="empty">{query ? "No matches" : "Share a post to Edge on your phone, or paste a link below. Saves land here."}</div>
+        {/each}
+      </div>
+      {@render capture("slim")}
     {:else}
       <View
         {sections}
@@ -731,6 +785,23 @@
 </main>
 
 <style>
+  .tabs { display: flex; gap: 4px; padding: 0 2px 8px; }
+  .tabs button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; color: var(--muted); background: none; }
+  .tabs button:hover { background: var(--surface-2); }
+  .tabs button.on { background: var(--surface-2); color: var(--text); font-weight: 600; }
+  .tabs span { margin-left: 6px; color: var(--faint); font-weight: 500; }
+  .saves { flex: 1; min-height: 0; overflow: auto; margin: 0 -4px; }
+  .save { display: flex; align-items: center; border-radius: 10px; }
+  .save:hover { background: var(--surface-2); }
+  .save .open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 8px 6px 8px 8px; background: none; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+  .mark { width: 28px; height: 28px; border-radius: 50%; flex: none; display: grid; place-items: center; background: var(--c); color: #fff; font-size: 11.5px; font-weight: 700; }
+  .mark.mono { background: var(--text); color: var(--bg); } /* Threads and X: black on light, light on dark */
+  .body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .st { font-weight: 500; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; }
+  .meta { color: var(--faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .save .del { opacity: 0; margin-right: 4px; }
+  .save:hover .del, .save .del:focus-visible { opacity: 1; }
+  .empty { color: var(--faint); padding: 24px 12px; text-align: center; line-height: 1.4; }
   :global(:root) {
     --bg: #faf9f7;
     --surface: #ffffff;

@@ -8,7 +8,57 @@ export type Note = {
   created_at: number;
   updated_at: number;
   color: string | null;
+  /** Present when the note is a saved post. */
+  link?: Link;
 };
+
+export type Link = {
+  url: string;
+  platform: "instagram" | "threads" | "x" | "youtube" | "web";
+  title: string | null;
+  author: string | null;
+  text: string | null;
+  thumbnail: string | null;
+  folder: string | null;
+  done: boolean;
+  opened_at: number | null;
+};
+
+/** Names and brand colours, the same as the phone app. */
+export const PLATFORMS: Record<string, { name: string; color: string; mark: string }> = {
+  instagram: { name: "Instagram", color: "#e1306c", mark: "IG" },
+  threads: { name: "Threads", color: "#101010", mark: "@" },
+  x: { name: "X", color: "#101010", mark: "𝕏" },
+  youtube: { name: "YouTube", color: "#ff0033", mark: "▶" },
+};
+
+const host = (url: string) => {
+  try {
+    return new URL(url).host.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+};
+
+export const platformName = (l: Link) => PLATFORMS[l.platform]?.name ?? host(l.url);
+
+/** A save's card title: the page's title once fetched, else the words shared with the link,
+ *  else the link without "https://www.". Same rule as the phone. */
+export function saveTitle(n: Note): string {
+  const l = n.link!;
+  if (l.title?.trim()) return l.title.trim();
+  const words = n.body.split(/\s+/).filter((w) => !/^https?:\/\//.test(w)).join(" ").trim();
+  if (words) return words;
+  try {
+    const u = new URL(l.url);
+    return host(l.url) + (u.pathname === "/" ? "" : u.pathname);
+  } catch {
+    return l.url;
+  }
+}
+
+/** Typed or pasted text that is nothing but a link is saved as a post; anything else is a note. */
+export const isOnlyLink = (text: string) => /^https?:\/\/\S+$/.test(text.trim());
 
 /** Distinct, readable on light and dark. New pins take the first colour no other pin uses. */
 export const PALETTE = ["#f5a524", "#3b82f6", "#ec4899", "#22c55e", "#8b5cf6", "#14b8a6", "#ef4444", "#64748b"];

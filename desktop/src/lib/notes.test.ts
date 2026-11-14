@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checklistItems, edgeTabs, nextColor, PALETTE, preview, progress, sections, type Note } from "./notes.ts";
+import { checklistItems, edgeTabs, isOnlyLink, nextColor, PALETTE, preview, progress, saveTitle, sections, type Note } from "./notes.ts";
 
 let t = 0;
 const note = (body: string, extra: Partial<Note> = {}): Note => ({
@@ -55,4 +55,18 @@ test("sections: pinned, today, earlier; search is one flat list", () => {
   ]);
   assert.deepEqual(sections(notes, true, now).map((s) => s.name), ["Results"]);
   assert.deepEqual(sections([], true, now), []);
+});
+
+test("a save is titled by its page, then the shared words, then its link", () => {
+  const url = "https://www.instagram.com/reel/DftSYUwtKNT";
+  const link = { url, platform: "instagram" as const, title: null, author: null, text: null, thumbnail: null, folder: null, done: false, opened_at: null };
+  assert.equal(saveTitle(note(url, { link: { ...link, title: "Chess tips" } })), "Chess tips");
+  assert.equal(saveTitle(note("Best dal recipe\nhttps://example.com/dal", { link: { ...link, url: "https://example.com/dal" } })), "Best dal recipe");
+  assert.equal(saveTitle(note(url, { link })), "instagram.com/reel/DftSYUwtKNT");
+});
+
+test("only a bare link is saved as a post", () => {
+  assert.ok(isOnlyLink("  https://x.com/jack/status/20 "));
+  assert.ok(!isOnlyLink("call Ravi about https://x.com/jack/status/20"));
+  assert.ok(!isOnlyLink("x.com/jack"));
 });

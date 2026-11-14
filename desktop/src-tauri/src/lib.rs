@@ -83,6 +83,44 @@ fn note_set_pinned(s: State<Notes>, id: Uuid, pinned: bool, sync: State<SyncStat
 }
 
 #[tauri::command]
+fn note_delete(s: State<Notes>, id: Uuid, sync: State<SyncState>) -> CmdResult<()> {
+    with_store(&s, |st| st.delete(id))?;
+    sync.kick(false);
+    Ok(())
+}
+
+#[tauri::command]
+fn saves_list(s: State<Notes>) -> CmdResult<Vec<Note>> {
+    with_store(&s, |st| st.saves())
+}
+
+#[tauri::command]
+fn saves_search(s: State<Notes>, query: String) -> CmdResult<Vec<Note>> {
+    with_store(&s, |st| st.search_saves(&query))
+}
+
+/// Saves the link in `text`. Returns the save and whether it is new (false: already saved).
+#[tauri::command]
+fn save_create(s: State<Notes>, text: String, sync: State<SyncState>) -> CmdResult<(Note, bool)> {
+    if notes_core::Link::from_text(&text).is_none() {
+        return Err("There is no link to save in that text.".into());
+    }
+    let r = with_store(&s, |st| st.create_save(&text))?;
+    sync.kick(false);
+    Ok(r)
+}
+
+/// Opens a save's original post in the browser. The URL comes from the store (cleaned http(s)
+/// links only), never from the page.
+#[tauri::command]
+fn save_open(s: State<Notes>, id: Uuid, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.mark_opened(id))?;
+    google::open_browser(&n.link.as_ref().expect("mark_opened only succeeds for saves").url)?;
+    sync.kick(false);
+    Ok(n)
+}
+
+#[tauri::command]
 fn note_set_color(s: State<Notes>, id: Uuid, color: Option<String>, sync: State<SyncState>) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.set_color(id, color.as_deref()))?;
     sync.kick(false);
@@ -314,6 +352,11 @@ pub fn run() {
             note_update,
             note_set_pinned,
             note_set_color,
+            note_delete,
+            saves_list,
+            saves_search,
+            save_create,
+            save_open,
             set_tab_count,
             focus_panel,
             set_peek,
