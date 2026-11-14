@@ -3,6 +3,7 @@ mod hotkey;
 mod settings;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use notes_core::{Note, Store, Uuid};
@@ -18,7 +19,15 @@ struct AppSettings {
     current: Mutex<settings::Settings>,
 }
 
+/// Whether the panel is currently expanded, so a settings change can re-place the window correctly.
+#[derive(Default)]
+struct Expanded(AtomicBool);
+
 type CmdResult<T> = Result<T, String>;
+
+fn current_settings(s: &State<AppSettings>) -> CmdResult<settings::Settings> {
+    s.current.lock().map(|c| c.clone()).map_err(|e| e.to_string())
+}
 
 fn with_store<T, E: std::fmt::Display>(s: &State<Notes>, f: impl FnOnce(&mut Store) -> Result<T, E>) -> CmdResult<T> {
     let mut store = s.0.lock().map_err(|e| e.to_string())?;
@@ -51,8 +60,15 @@ fn note_set_pinned(s: State<Notes>, id: Uuid, pinned: bool) -> CmdResult<Note> {
 }
 
 #[tauri::command]
-fn set_expanded(window: WebviewWindow, expanded: bool, focus: bool) -> CmdResult<()> {
-    edge::place(&window, expanded).map_err(|e| e.to_string())?;
+fn set_expanded(
+    window: WebviewWindow,
+    s: State<AppSettings>,
+    state: State<Expanded>,
+    expanded: bool,
+    focus: bool,
+) -> CmdResult<()> {
+    state.0.store(expanded, Ordering::Relaxed);
+    edge::place(&window, expanded, &current_settings(&s)?).map_err(|e| e.to_string())?;
     if expanded && focus {
         window.set_focus().map_err(|e| e.to_string())?;
     }
@@ -98,6 +114,58 @@ fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String)
     Ok(status)
 }
 
+#[tauri::command]
+fn get_settings(s: State<AppSettings>) -> CmdResult<settings::Settings> {
+    current_settings(&s)
+}
+
+/// Save everything except the hotkey (set_hotkey owns that) and move the window to match.
+#[tauri::command]
+fn save_settings(
+    window: WebviewWindow,
+    s: State<AppSettings>,
+    state: State<Expanded>,
+    new: settings::Settings,
+) -> CmdResult<settings::Settings> {
+    let saved = {
+        let mut current = s.current.lock().map_err(|e| e.to_string())?;
+        *current = settings::Settings { hotkey: current.hotkey.clone(), ..new }.sanitized();
+        settings::save(&s.dir, &current).map_err(|e| e.to_string())?;
+        current.clone()
+    };
+    edge::place(&window, state.0.load(Ordering::Relaxed), &saved).map_err(|e| e.to_string())?;
+    Ok(saved)
+}
+
+/// Live resize while the user drags the panel edge; `save` on release only, to spare the disk.
+#[tauri::command]
+fn set_panel_width(window: WebviewWindow, s: State<AppSettings>, width: f64, save: bool) -> CmdResult<()> {
+    let snapshot = {
+        let mut current = s.current.lock().map_err(|e| e.to_string())?;
+        current.panel_width = Some(width.max(edge::PANEL_MIN_WIDTH));
+        if save {
+            settings::save(&s.dir, &current).map_err(|e| e.to_string())?;
+        }
+        current.clone()
+    };
+    edge::place(&window, true, &snapshot).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    if enabled { al.enable() } else { al.disable() }.map_err(|e| e.to_string())?;
+    al.is_enabled().map_err(|e| e.to_string())
+}
+
 /// Lets the webview write to the dev console (debug builds only; a no-op in release).
 #[tauri::command]
 fn debug_log(msg: String) {
@@ -121,9 +189,11 @@ fn device_id(dir: &Path) -> std::io::Result<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().manage(hotkey::Hotkey::default());
+    let builder = tauri::Builder::default().manage(hotkey::Hotkey::default()).manage(Expanded::default());
     #[cfg(desktop)]
-    let builder = builder.plugin(hotkey::plugin());
+    let builder = builder
+        .plugin(hotkey::plugin())
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None));
     builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
@@ -134,12 +204,14 @@ pub fn run() {
             if let Err(e) = hotkey::apply(app.handle(), &loaded.hotkey, None) {
                 eprintln!("hotkey: {e}"); // shown in settings via get_hotkey's error
             }
-            app.manage(AppSettings { dir: dir.clone(), current: Mutex::new(loaded) });
-
             let window = app.get_webview_window("main").expect("main window is declared in tauri.conf.json");
-            let placed = edge::place(&window, false)?;
+            let placed = edge::place(&window, false, &loaded)?;
+            let probe_settings = loaded.clone();
+            app.manage(AppSettings { dir: dir.clone(), current: Mutex::new(loaded) });
             edge::forward_pointer_crossings(&window)?;
-            window.show()?;
+            if probe_settings.show_bar || edge::backend() == "x11" {
+                window.show()?; // X11 hides the bar with an empty input shape instead of unmapping
+            }
             if std::env::var_os("EDGE_PROBE").is_some() {
                 // Task 3 probe: did the window manager honour our position?
                 let w = window.clone();
@@ -157,8 +229,9 @@ pub fn run() {
                         // GTK must be called on the main thread.
                         let (tx, rx) = std::sync::mpsc::channel();
                         let w2 = w.clone();
+                        let ps = probe_settings.clone();
                         let _ = w.run_on_main_thread(move || {
-                            let _ = tx.send(edge::place(&w2, expanded).ok().flatten());
+                            let _ = tx.send(edge::place(&w2, expanded, &ps).ok().flatten());
                         });
                         let r = rx.recv().ok().flatten();
                         std::thread::sleep(std::time::Duration::from_millis(800));
@@ -182,7 +255,12 @@ pub fn run() {
             debug_log,
             platform,
             get_hotkey,
-            set_hotkey
+            set_hotkey,
+            get_settings,
+            save_settings,
+            set_panel_width,
+            get_autostart,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

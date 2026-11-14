@@ -3,11 +3,14 @@
 
 use tauri::{PhysicalPosition, PhysicalSize, WebviewWindow};
 
+use crate::settings::{Settings, Side};
+
 /// Collapsed bar, in logical pixels.
 const BAR_WIDTH: f64 = 8.0;
 const BAR_HEIGHT: f64 = 120.0;
-/// The expanded panel is a third of the work area, but never narrower than this.
-const PANEL_MIN_WIDTH: f64 = 320.0;
+/// The expanded panel defaults to a third of the work area; the user can drag it between these.
+pub const PANEL_MIN_WIDTH: f64 = 320.0;
+const PANEL_MAX_FRACTION: f64 = 0.8;
 
 /// A rectangle in physical pixels: x, y, width, height.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -19,36 +22,48 @@ pub struct Rect {
 }
 
 /// Where the window goes, given the monitor's work area (which excludes GNOME's top bar,
-/// the Windows taskbar and the macOS menu bar). Right edge only for now; edge side is a setting in Task 6.
-pub fn edge_rect(work: Rect, scale: f64, expanded: bool) -> Rect {
+/// the Windows taskbar and the macOS menu bar).
+pub fn edge_rect(work: Rect, scale: f64, expanded: bool, s: &Settings) -> Rect {
     let (w, h) = if expanded {
-        let w = ((PANEL_MIN_WIDTH * scale) as u32).max(work.w / 3).min(work.w);
-        (w, work.h)
+        let min = ((PANEL_MIN_WIDTH * scale) as u32).min(work.w);
+        let max = ((work.w as f64 * PANEL_MAX_FRACTION) as u32).max(min);
+        let want = s.panel_width.map_or(work.w / 3, |w| (w * scale) as u32);
+        (want.clamp(min, max), work.h)
     } else {
         ((BAR_WIDTH * scale).round() as u32, ((BAR_HEIGHT * scale).round() as u32).min(work.h))
     };
-    let x = work.x + (work.w - w) as i32;
-    let y = if expanded { work.y } else { work.y + ((work.h - h) / 2) as i32 };
+    let x = match s.side {
+        Side::Left => work.x,
+        Side::Right => work.x + (work.w - w) as i32,
+    };
+    let y = if expanded { work.y } else { work.y + ((work.h - h) as f64 * s.bar_position).round() as i32 };
     Rect { x, y, w, h }
 }
 
-pub fn place(window: &WebviewWindow, expanded: bool) -> tauri::Result<Option<Rect>> {
+pub fn place(window: &WebviewWindow, expanded: bool, s: &Settings) -> tauri::Result<Option<Rect>> {
     let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) else {
         return Ok(None);
     };
     let wa = monitor.work_area();
     let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width, h: wa.size.height };
-    let r = edge_rect(work, monitor.scale_factor(), expanded);
+    let scale = monitor.scale_factor();
+    let r = edge_rect(work, scale, expanded, s);
     #[cfg(target_os = "linux")]
     {
-        let panel = edge_rect(work, monitor.scale_factor(), true);
-        let bar = edge_rect(work, monitor.scale_factor(), false);
-        if place_x11(window, panel, (!expanded).then_some(bar))? {
+        let panel = edge_rect(work, scale, true, s);
+        // Collapsed: only the bar takes the pointer, or nothing at all when the bar is hidden.
+        let input = (!expanded).then(|| s.show_bar.then(|| edge_rect(work, scale, false, s)));
+        if place_x11(window, panel, input)? {
             return Ok(Some(r));
         }
     }
     window.set_size(PhysicalSize::new(r.w, r.h))?;
     window.set_position(PhysicalPosition::new(r.x, r.y))?;
+    if expanded || s.show_bar {
+        window.show()?;
+    } else {
+        window.hide()?; // hotkey-only mode
+    }
     Ok(Some(r))
 }
 
@@ -57,7 +72,9 @@ pub fn place(window: &WebviewWindow, expanded: bool) -> tauri::Result<Option<Rec
 /// to the windows underneath. Resizing on every open made GNOME show the newly exposed area black
 /// for a frame before WebKit painted it, which looked like a flicker. Returns false when not on X11.
 #[cfg(target_os = "linux")]
-fn place_x11(window: &WebviewWindow, panel: Rect, bar: Option<Rect>) -> tauri::Result<bool> {
+/// `input`: None = expanded, the whole window takes input; Some(None) = collapsed with no bar;
+/// Some(Some(bar)) = collapsed, only the bar takes input.
+fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>) -> tauri::Result<bool> {
     use gtk::cairo::{RectangleInt, Region};
     use gtk::prelude::*;
     let gtk_window = window.gtk_window()?;
@@ -78,10 +95,14 @@ fn place_x11(window: &WebviewWindow, panel: Rect, bar: Option<Rect>) -> tauri::R
         gtk_window.resize(w, h);
         gtk_window.move_(x, y);
     }
-    let region = bar.map(|b| {
-        let bw = (b.w as i32 / s).max(1);
-        let bh = b.h as i32 / s;
-        Region::create_rectangle(&RectangleInt::new(w - bw, (b.y - panel.y) / s, bw, bh))
+    let region = input.map(|bar| match bar {
+        None => Region::create(),
+        Some(b) => {
+            let bw = (b.w as i32 / s).max(1);
+            let bh = b.h as i32 / s;
+            let bx = if b.x == panel.x { 0 } else { w - bw };
+            Region::create_rectangle(&RectangleInt::new(bx, (b.y - panel.y) / s, bw, bh))
+        }
     });
     gtk_window.input_shape_combine_region(region.as_ref());
     Ok(true)
@@ -151,6 +172,30 @@ mod tests {
 
     // 1920x1080 screen, GNOME top bar 32px tall.
     const WORK: Rect = Rect { x: 0, y: 32, w: 1920, h: 1048 };
+
+    fn edge_rect(work: Rect, scale: f64, expanded: bool) -> Rect {
+        super::edge_rect(work, scale, expanded, &Settings::default())
+    }
+
+    #[test]
+    fn left_side_and_bar_position() {
+        let s = Settings { side: Side::Left, bar_position: 0.0, ..Default::default() };
+        assert_eq!(super::edge_rect(WORK, 1.0, false, &s), Rect { x: 0, y: 32, w: 8, h: 120 });
+        assert_eq!(super::edge_rect(WORK, 1.0, true, &s).x, 0);
+        let bottom = Settings { bar_position: 1.0, ..Default::default() };
+        let r = super::edge_rect(WORK, 1.0, false, &bottom);
+        assert_eq!(r.y + r.h as i32, 32 + 1048);
+    }
+
+    #[test]
+    fn dragged_panel_width_is_clamped() {
+        let w = |pw: f64| super::edge_rect(WORK, 1.0, true, &Settings { panel_width: Some(pw), ..Default::default() }).w;
+        assert_eq!(w(500.0), 500);
+        assert_eq!(w(50.0), 320);
+        assert_eq!(w(5000.0), 1536);
+        let hidpi = Settings { panel_width: Some(500.0), ..Default::default() };
+        assert_eq!(super::edge_rect(WORK, 2.0, true, &hidpi).w, 1000);
+    }
 
     #[test]
     fn collapsed_bar_hugs_right_edge_vertically_centred() {
