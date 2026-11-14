@@ -49,7 +49,23 @@ pub fn edge_rect(work: Rect, scale: f64, expanded: bool, s: &Settings, tabs: usi
     Rect { x, y, w, h }
 }
 
-pub fn place(window: &WebviewWindow, expanded: bool, s: &Settings, tabs: usize) -> tauri::Result<Option<Rect>> {
+/// A rectangle in window-local logical pixels (CSS px == GDK units), e.g. the tab preview card.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+pub struct Local {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// `peek`: while collapsed, the hovered tab's preview card also takes the pointer so it can be clicked.
+pub fn place(
+    window: &WebviewWindow,
+    expanded: bool,
+    s: &Settings,
+    tabs: usize,
+    peek: Option<Local>,
+) -> tauri::Result<Option<Rect>> {
     let Some(monitor) = window.current_monitor()?.or(window.primary_monitor()?) else {
         return Ok(None);
     };
@@ -62,7 +78,7 @@ pub fn place(window: &WebviewWindow, expanded: bool, s: &Settings, tabs: usize) 
         let panel = edge_rect(work, scale, true, s, tabs);
         // Collapsed: only the bar takes the pointer, or nothing at all when the bar is hidden.
         let input = (!expanded).then(|| s.show_bar.then(|| edge_rect(work, scale, false, s, tabs)));
-        if place_x11(window, panel, input)? {
+        if place_x11(window, panel, input, peek)? {
             return Ok(Some(r));
         }
     }
@@ -83,17 +99,29 @@ pub fn place(window: &WebviewWindow, expanded: bool, s: &Settings, tabs: usize) 
 #[cfg(target_os = "linux")]
 /// `input`: None = expanded, the whole window takes input; Some(None) = collapsed with no bar;
 /// Some(Some(bar)) = collapsed, only the bar takes input.
-fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>) -> tauri::Result<bool> {
+fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, peek: Option<Local>) -> tauri::Result<bool> {
     use gtk::cairo::{RectangleInt, Region};
     use gtk::prelude::*;
     let gtk_window = window.gtk_window()?;
     if gtk_window.window().is_none() {
+        // A dock, not a normal window: GNOME's "show desktop" (Super+D) hides every normal window,
+        // and docks can't be minimised. Must be set before the window is mapped.
+        gtk_window.set_type_hint(gtk::gdk::WindowTypeHint::Dock);
         gtk_window.realize(); // create the X11 window now, before it is first shown
     }
     let Some(gdk_window) = gtk_window.window() else { return Ok(false) };
     if !gdk_window.display().type_().name().contains("X11") {
         return Ok(false);
     }
+    // Tao starts a window-manager resize when the left button goes down within 5px of the edge
+    // of an undecorated, resizable window, and our bar sits on that edge: press-and-drag resized
+    // the window and moved the bar. Tao skips that for "decorated" windows, so mark the GTK
+    // window decorated and tell the window manager directly to draw no frame. (It must stay
+    // resizable: otherwise GTK pins its size.)
+    if !gtk_window.is_decorated() {
+        gtk_window.set_decorated(true);
+    }
+    gdk_window.set_decorations(gtk::gdk::WMDecoration::empty());
     // GDK works in its own (integer-scaled) units, Tauri's Rect is in physical pixels.
     let s = gtk_window.scale_factor().max(1);
     let (w, h) = (panel.w as i32 / s, panel.h as i32 / s);
@@ -110,7 +138,12 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>) -
             let bw = (b.w as i32 / s).max(1);
             let bh = b.h as i32 / s;
             let bx = if b.x == panel.x { 0 } else { w - bw };
-            Region::create_rectangle(&RectangleInt::new(bx, (b.y - panel.y) / s, bw, bh))
+            let region = Region::create_rectangle(&RectangleInt::new(bx, (b.y - panel.y) / s, bw, bh));
+            if let Some(p) = peek {
+                let r = RectangleInt::new(p.x.floor() as i32, p.y.floor() as i32, p.w.ceil() as i32, p.h.ceil() as i32);
+                let _ = region.union_rectangle(&r);
+            }
+            region
         }
     });
     gtk_window.input_shape_combine_region(region.as_ref());
@@ -122,18 +155,33 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>) -
 /// still receives the X11 crossing. Crossings into child widgets (the webview itself) are ignored.
 #[cfg(target_os = "linux")]
 pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
-    use gtk::gdk::NotifyType;
+    use gtk::gdk::{CrossingMode, NotifyType};
     use gtk::prelude::*;
     use tauri::Emitter;
 
+    use std::{cell::Cell, rc::Rc};
+
     let gtk_window = window.gtk_window()?;
     gtk_window.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
+    // While the pointer is inside, poll its position: WebKitGTK under XWayland delivers few DOM
+    // mousemove events, so moving from one tab to the next inside the strip went unnoticed.
+    // Inside our own X11 window the position is accurate (it only goes stale over Wayland windows).
+    let inside = Rc::new(Cell::new(false));
     for (kind, leave) in [("enter", false), ("leave", true)] {
         let w = window.clone();
-        let handler = move |_: &gtk::ApplicationWindow, e: &gtk::gdk::EventCrossing| {
-            if e.detail() != NotifyType::Inferior {
+        let inside = inside.clone();
+        let handler = move |win: &gtk::ApplicationWindow, e: &gtk::gdk::EventCrossing| {
+            // Grab/ungrab crossings come from focus and pointer grabs (GNOME focusing the panel,
+            // a click), not from the pointer moving; treating them as a leave made the panel
+            // open, close and open again.
+            if e.detail() != NotifyType::Inferior && e.mode() == CrossingMode::Normal {
                 let (x, y) = e.position();
                 let _ = w.emit("edge-pointer", serde_json::json!({ "kind": kind, "x": x, "y": y }));
+                if leave {
+                    inside.set(false);
+                } else if !inside.replace(true) {
+                    start_polling(win, w.clone(), inside.clone());
+                }
             }
             gtk::glib::Propagation::Proceed
         };
@@ -146,9 +194,55 @@ pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn start_polling(win: &gtk::ApplicationWindow, w: WebviewWindow, inside: std::rc::Rc<std::cell::Cell<bool>>) {
+    use gtk::prelude::*;
+    use tauri::Emitter;
+    let Some(gdk_window) = win.window() else { return };
+    let Some(pointer) = gdk_window.display().default_seat().and_then(|seat| seat.pointer()) else { return };
+    let mut last = (f64::NAN, f64::NAN);
+    gtk::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+        if !inside.get() {
+            return gtk::glib::ControlFlow::Break;
+        }
+        let (_, x, y, _) = gdk_window.device_position_double(&pointer);
+        if (x, y) != last {
+            last = (x, y);
+            let _ = w.emit("edge-pointer", serde_json::json!({ "kind": "move", "x": x, "y": y }));
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn forward_pointer_crossings(_window: &WebviewWindow) -> tauri::Result<()> {
     Ok(())
+}
+
+/// Give keyboard focus back after the panel collapses. On GNOME the panel is an XWayland window;
+/// once it had focus, typing kept going into the hidden search box. Setting the X focus to
+/// PointerRoot hands it back to the window manager, which refocuses the previous window.
+/// Returns false where this is not needed or not possible (non-X11).
+#[cfg(target_os = "linux")]
+pub fn release_focus(window: &WebviewWindow) -> tauri::Result<bool> {
+    use gtk::prelude::*;
+    let gtk_window = window.gtk_window()?;
+    let Some(gdk_window) = gtk_window.window() else { return Ok(false) };
+    let Ok(display) = gdk_window.display().downcast::<gdkx11::X11Display>() else { return Ok(false) };
+    // SAFETY: the Display pointer belongs to GDK and stays valid for the life of the app;
+    // XSetInputFocus and XFlush only send requests on it, on the GTK main thread.
+    unsafe {
+        use gtk::glib::translate::ToGlibPtr;
+        let xd = gdk_x11_sys::gdk_x11_display_get_xdisplay(display.to_glib_none().0) as *mut x11::xlib::Display;
+        x11::xlib::XSetInputFocus(xd, x11::xlib::PointerRoot as u64, x11::xlib::RevertToPointerRoot, x11::xlib::CurrentTime);
+        x11::xlib::XFlush(xd);
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn release_focus(_window: &WebviewWindow) -> tauri::Result<bool> {
+    Ok(false)
 }
 
 /// Which windowing backend we ended up on. GNOME on Wayland ignores window positioning
