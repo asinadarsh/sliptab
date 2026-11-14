@@ -132,25 +132,26 @@ pub fn sync_status(st: State<SyncState>) -> Status {
     st.status.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
+/// "Continue with Google": browser sign-in, then this laptop's own session on the sync server.
 #[tauri::command]
-pub async fn sync_sign_in_start(email: String) -> CmdResult<()> {
-    blocking(move || Client::new(SERVER).start_sign_in(email.trim()).map_err(|e| e.to_string())).await
-}
-
-#[tauri::command]
-pub async fn sync_sign_in_verify(app: AppHandle, email: String, code: String) -> CmdResult<Status> {
-    let email = email.trim().to_lowercase();
-    let token = {
-        let email = email.clone();
-        blocking(move || Client::new(SERVER).verify(&email, code.trim(), &device_name()).map_err(|e| e.to_string()))
-            .await?
-    };
+pub async fn sync_sign_in_google(app: AppHandle) -> CmdResult<Status> {
+    let (email, token) = blocking(|| {
+        let id_token = crate::google::sign_in()?;
+        let client = Client::new(SERVER);
+        let token = client.sign_in_google(&id_token, &device_name()).map_err(|e| e.to_string())?;
+        let email = client.me(&token).map_err(|e| e.to_string())?.email;
+        Ok((email, token))
+    })
+    .await?;
     let st = app.state::<SyncState>();
     let json = serde_json::to_string(&Account { email: email.clone(), token }).map_err(|e| e.to_string())?;
     write_private(&st.account_path(), &json).map_err(|e| e.to_string())?;
     let status = Status { email: Some(email), ..Status::default() };
     *st.status.lock().map_err(|e| e.to_string())? = status.clone();
     st.kick(true);
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_focus(); // back from the browser
+    }
     Ok(status)
 }
 

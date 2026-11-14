@@ -59,9 +59,6 @@
   // ---- sync (runs in Rust; the page shows its status and does sign-in)
   type SyncStatus = { email: string | null; lastSyncedAt: number | null; error: string | null; received: number };
   let sync: SyncStatus = $state({ email: null, lastSyncedAt: null, error: null, received: 0 });
-  let syncEmail = $state("");
-  let syncCode = $state("");
-  let codeSent = $state(false);
   let syncBusy = $state(false);
   let syncMsg = $state("");
   /** A note arrived from another device since the panel was last open: dot on the bar. */
@@ -378,17 +375,8 @@
     }
     syncBusy = false;
   }
-  const sendCode = () =>
-    syncStep(async () => {
-      await invoke("sync_sign_in_start", { email: syncEmail });
-      codeSent = true;
-    });
-  const verifyCode = () =>
-    syncStep(async () => {
-      sync = await invoke<SyncStatus>("sync_sign_in_verify", { email: syncEmail, code: syncCode });
-      codeSent = false;
-      syncCode = "";
-    });
+  // Opens the browser at Google; resolves when the user is back and signed in.
+  const signInGoogle = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_in_google")));
   const signOutSync = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_out")));
 
   async function openSettings() {
@@ -635,21 +623,10 @@
         {:else}
           <section class="setting col">
             <div class="sub">Get your phone's notes here. Free for 14 days, no card needed.</div>
-            {#if !codeSent}
-              <div class="row">
-                <input class="field grow" type="email" placeholder="Email" bind:value={syncEmail} aria-label="Email"
-                  onkeydown={(e) => e.key === "Enter" && sendCode()} />
-                <button class="pill" disabled={syncBusy || !syncEmail.trim()} onclick={sendCode}>Send code</button>
-              </div>
-            {:else}
-              <div class="sub">Enter the 6-digit code sent to {syncEmail.trim()}.</div>
-              <div class="row">
-                <input class="field grow" inputmode="numeric" maxlength="6" placeholder="Code" bind:value={syncCode} aria-label="Code"
-                  onkeydown={(e) => e.key === "Enter" && verifyCode()} />
-                <button class="pill" disabled={syncBusy || syncCode.trim().length !== 6} onclick={verifyCode}>Turn on sync</button>
-              </div>
-              <button class="link" onclick={() => ((codeSent = false), (syncCode = ""))}>Use a different email</button>
-            {/if}
+            <button class="google" disabled={syncBusy} onclick={signInGoogle}>
+              <svg viewBox="0 0 48 48" width="16" height="16" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
+              {syncBusy ? "Finish signing in in your browser…" : "Continue with Google"}
+            </button>
           </section>
           {#if sync.error}<p class="error pad">{sync.error}</p>{/if}
         {/if}
@@ -1105,21 +1082,6 @@
     background: #22c55e;
     box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
   }
-  .row {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-  .field {
-    min-width: 0;
-    padding: 6px 9px;
-    border-radius: 8px;
-    border: 1px solid var(--line);
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    font-size: 13px;
-  }
   .pill {
     flex: none;
     padding: 5px 11px;
@@ -1131,11 +1093,21 @@
   .pill:disabled {
     opacity: 0.5;
   }
-  .link {
-    align-self: flex-start;
-    color: var(--muted);
-    font-size: 12px;
-    text-decoration: underline;
+  .google {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    padding: 8px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .google:disabled {
+    opacity: 0.6;
   }
   .settings {
     flex: 1;

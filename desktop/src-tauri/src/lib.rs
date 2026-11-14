@@ -1,4 +1,5 @@
 mod edge;
+mod google;
 mod hotkey;
 mod settings;
 mod sync;
@@ -326,8 +327,7 @@ pub fn run() {
             get_autostart,
             set_autostart,
             sync::sync_status,
-            sync::sync_sign_in_start,
-            sync::sync_sign_in_verify,
+            sync::sync_sign_in_google,
             sync::sync_sign_out,
             sync::sync_now
         ])
