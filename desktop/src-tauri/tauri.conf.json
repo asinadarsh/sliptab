@@ -40,6 +40,21 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
-  }
+    ],
+    "category": "Productivity",
+    "shortDescription": "Notes on the edge of your screen",
+    "longDescription": "Quick-capture notes in a thin bar on the edge of your screen. Hover or press a hotkey to open.",
+    "copyright": "Copyright (C) 2026 Adarsh Kumar Singh. GPL-3.0-only.",
+    "publisher": "Adarsh Kumar Singh",
+    "license": "GPL-3.0-only",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
+      }
+    }
+  },
+  "mainBinaryName": "edge"
 }

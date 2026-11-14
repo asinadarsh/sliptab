@@ -246,7 +246,7 @@ mod portal {
             path,
             format!(
                 "[Desktop Entry]\nType=Application\nName=Edge\nComment=Notes on the edge of your screen\n\
-                 Exec=\"{}\"\nIcon={id}\nTerminal=false\nCategories=Utility;\n",
+                 Exec=\"{}\"\nIcon=edge\nTerminal=false\nCategories=Utility;\n",
                 exe.display()
             ),
         )
