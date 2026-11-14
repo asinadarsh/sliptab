@@ -5,6 +5,8 @@ mod note;
 #[cfg(feature = "store")]
 mod store;
 pub mod sync;
+#[cfg(feature = "client")]
+pub mod client;
 
 pub use note::{derive_title, valid_color, Note};
 #[cfg(feature = "store")]
