@@ -3,6 +3,7 @@
 
 mod note;
 mod store;
+pub mod sync;
 
 pub use note::{derive_title, valid_color, Note};
 pub use store::Store;
