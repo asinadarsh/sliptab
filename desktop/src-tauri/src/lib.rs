@@ -112,6 +112,22 @@ fn save_create(s: State<Notes>, text: String, sync: State<SyncState>) -> CmdResu
 
 /// Opens a save's original post in the browser. The URL comes from the store (cleaned http(s)
 /// links only), never from the page.
+/// Folder name and how many saves it holds.
+type FolderCounts = Vec<(String, i64)>;
+
+/// The folders holding saves (with counts) and the default list, for the folder chips and menu.
+#[tauri::command]
+fn save_folders(s: State<Notes>) -> CmdResult<(FolderCounts, Vec<&'static str>)> {
+    Ok((with_store(&s, |st| st.save_folders())?, notes_core::folders::FOLDERS.to_vec()))
+}
+
+#[tauri::command]
+fn save_set_folder(s: State<Notes>, id: Uuid, folder: Option<String>, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.set_save_folder(id, folder.as_deref()))?;
+    sync.kick(false);
+    Ok(n)
+}
+
 #[tauri::command]
 fn save_open(s: State<Notes>, id: Uuid, sync: State<SyncState>) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.mark_opened(id))?;
@@ -355,6 +371,8 @@ pub fn run() {
             note_delete,
             saves_list,
             saves_search,
+            save_folders,
+            save_set_folder,
             save_create,
             save_open,
             set_tab_count,

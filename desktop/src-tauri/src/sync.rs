@@ -1,5 +1,6 @@
 //! Sync for the desktop app. One background thread syncs every 60 s, 2 s after a local edit
-//! and when the panel opens; the network call never holds the note store's lock.
+//! and when the panel opens; the network call never holds the note store's lock. Before each
+//! sync it fetches details for new saves.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
@@ -14,6 +15,8 @@ use crate::{CmdResult, Notes};
 
 const SERVER: &str = "https://edge-sync.forcesync.in";
 pub const STATUS_EVENT: &str = "sync-status";
+/// Saves got their title, thumbnail or folder: the page reloads its lists.
+pub const SAVES_EVENT: &str = "saves-updated";
 
 #[derive(Serialize, Deserialize)]
 struct Account {
@@ -78,8 +81,12 @@ pub fn start(app: &AppHandle, dir: &Path) {
 
 fn run(app: &AppHandle) {
     let st = app.state::<SyncState>();
-    let Some(account) = st.account() else { return };
     let notes = app.state::<Notes>();
+    // New saves first, so they go up with their details in this same sync. Works signed out too.
+    if notes_core::client::fill_details(&notes.0, 20) > 0 {
+        let _ = app.emit(SAVES_EVENT, ());
+    }
+    let Some(account) = st.account() else { return };
     let result = Client::new(SERVER).sync(&notes.0, &account.token);
     let mut status = st.status.lock().unwrap_or_else(|e| e.into_inner()).clone();
     status.received = 0;

@@ -30,7 +30,12 @@
   let query = $state("");
   let tab: "notes" | "saved" = $state("notes");
   let allSaves: Note[] = $state([]);
-  let saves: Note[] = $state([]); // what the Saved list shows (search results while searching)
+  let found: Note[] = $state([]); // saves matching the search
+  let folders: [string, number][] = $state([]);
+  let defaultFolders: string[] = $state([]);
+  let folder: string | null = $state(null); // the chosen folder chip; null: all, "" : unsorted
+  const saves = $derived(folder === null ? found : found.filter((n) => (n.link?.folder ?? "") === folder));
+  const unsorted = $derived(allSaves.filter((n) => !n.link?.folder).length);
   let selectedId: string | null = $state(null);
   let editing: Note | null = $state(null);
   let draft = $state("");
@@ -221,7 +226,10 @@
     all = await invoke<Note[]>("notes_list");
     notes = query.trim() && tab === "notes" ? await invoke<Note[]>("notes_search", { query }) : all;
     allSaves = await invoke<Note[]>("saves_list");
-    saves = query.trim() && tab === "saved" ? await invoke<Note[]>("saves_search", { query }) : allSaves;
+    found = query.trim() && tab === "saved" ? await invoke<Note[]>("saves_search", { query }) : allSaves;
+    [folders, defaultFolders] = await invoke<[[string, number][], string[]]>("save_folders");
+    if (folder && !folders.some(([f]) => f === folder)) folder = null;
+    if (folder === "" && !allSaves.some((n) => !n.link?.folder)) folder = null;
     if (!flat.some((n) => n.id === selectedId)) selectedId = flat[0]?.id ?? null;
   }
 
@@ -274,10 +282,19 @@
   async function openSave(n: Note) {
     try {
       const updated = await invoke<Note>("save_open", { id: n.id });
-      saves = saves.map((x) => (x.id === n.id ? updated : x));
+      found = found.map((x) => (x.id === n.id ? updated : x));
     } catch (e) {
       log(`open save: ${e}`);
     }
+  }
+
+  /** Moves a save; "" is Unsorted, "\u0001new" asks for a name. False if the user cancelled. */
+  async function moveSave(n: Note, to: string): Promise<boolean> {
+    const name = to === "\u0001new" ? prompt("New folder name")?.trim().slice(0, 40) : to;
+    if (!name && to !== "") return false;
+    await invoke("save_set_folder", { id: n.id, folder: to === "" ? null : name });
+    await refresh();
+    return true;
   }
 
   async function deleteSave(n: Note) {
@@ -492,6 +509,7 @@
     void invoke<Settings>("get_settings").then((c) => (cfg = c));
     void listen("edge-hotkey", () => edge.hotkey());
     void invoke<SyncStatus>("sync_status").then((st) => (sync = st));
+    void listen("saves-updated", () => void refresh());
     void listen<SyncStatus>("sync-status", (e) => {
       sync = e.payload;
       if (e.payload.received > 0) {
@@ -750,18 +768,43 @@
       <textarea class="editor" bind:this={editorEl} bind:value={draft} oninput={scheduleSave} spellcheck="true"></textarea>
     {:else if tab === "saved"}
       {@render header()}
+      {#if allSaves.length}
+        <div class="folders" aria-label="Folders">
+          <button class:on={folder === null} onclick={() => (folder = null)}>All <span>{allSaves.length}</span></button>
+          {#each folders as [f, c] (f)}
+            <button class:on={folder === f} onclick={() => (folder = f)}>{f} <span>{c}</span></button>
+          {/each}
+          {#if unsorted}<button class:on={folder === ""} onclick={() => (folder = "")}>Unsorted <span>{unsorted}</span></button>{/if}
+        </div>
+      {/if}
       <div class="saves">
         {#each saves as n (n.id)}
           {@const l = n.link!}
           {@const p = PLATFORMS[l.platform]}
           <div class="save" data-id={n.id}>
             <button class="open" onclick={() => openSave(n)} title="Open in {platformName(l)}">
-              <span class="mark" class:mono={p?.color === "#101010"} style:--c={p?.color ?? "var(--accent)"}>{p?.mark ?? "↗"}</span>
+              <span class="lead">
+                {#if l.thumbnail}
+                  <img src={l.thumbnail} alt="" loading="lazy" referrerpolicy="no-referrer" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")} />
+                {/if}
+                <span class="mark" class:small={!!l.thumbnail} class:mono={p?.color === "#101010"} style:--c={p?.color ?? "var(--accent)"}>{p?.mark ?? "↗"}</span>
+              </span>
               <span class="body">
                 <span class="st">{saveTitle(n)}</span>
-                <span class="meta">{platformName(l)}{l.author ? ` · ${l.author}` : ""} · {ago(n.created_at)}{l.opened_at ? " · opened" : ""}</span>
+                <span class="meta">{platformName(l)}{l.author ? ` · ${l.author}` : ""} · {ago(n.created_at)}{l.opened_at ? " · opened" : ""}{folder === null && l.folder ? ` · ${l.folder}` : ""}</span>
               </span>
             </button>
+            <select class="move" aria-label="Folder" title="Move to a folder" value={l.folder ?? ""}
+              onchange={(e) => {
+                const el = e.currentTarget as HTMLSelectElement;
+                void moveSave(n, el.value).then((moved) => { if (!moved) el.value = l.folder ?? ""; });
+              }}>
+              <option value="">Unsorted</option>
+              {#each [...new Set([...defaultFolders, ...folders.map(([f]) => f), ...(l.folder ? [l.folder] : [])])] as f (f)}
+                <option value={f}>{f}</option>
+              {/each}
+              <option value={"\u0001new"}>New folder…</option>
+            </select>
             <button class="ib del" onclick={() => deleteSave(n)} aria-label="Delete save" title="Delete"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
           </div>
         {:else}
@@ -801,6 +844,15 @@
   .meta { color: var(--faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .save .del { opacity: 0; margin-right: 4px; }
   .save:hover .del, .save .del:focus-visible { opacity: 1; }
+  .folders { display: flex; gap: 6px; overflow-x: auto; padding: 0 2px 8px; scrollbar-width: none; }
+  .folders button { font: inherit; font-size: 12px; white-space: nowrap; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--muted); }
+  .folders button.on { border-color: var(--accent); color: var(--text); font-weight: 600; }
+  .folders span { color: var(--faint); font-weight: 500; margin-left: 3px; }
+  .lead { position: relative; width: 40px; height: 40px; flex: none; display: grid; place-items: center; }
+  .lead img { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; }
+  .lead .mark.small { position: absolute; right: -4px; bottom: -4px; width: 18px; height: 18px; font-size: 8.5px; box-shadow: 0 0 0 2px var(--bg); }
+  .move { opacity: 0; max-width: 92px; font: inherit; font-size: 11.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; }
+  .save:hover .move, .move:focus { opacity: 1; }
   .empty { color: var(--faint); padding: 24px 12px; text-align: center; line-height: 1.4; }
   :global(:root) {
     --bg: #faf9f7;
