@@ -82,6 +82,10 @@ pub fn place(
             return Ok(Some(r));
         }
     }
+    // ponytail: elsewhere the window resizes to the bar, so the preview card has no room to be
+    // clickable yet; per-OS edge windows (Windows/macOS phase) will fix that.
+    #[cfg(not(target_os = "linux"))]
+    let _ = peek;
     window.set_size(PhysicalSize::new(r.w, r.h))?;
     window.set_position(PhysicalPosition::new(r.x, r.y))?;
     if expanded || s.show_bar {
