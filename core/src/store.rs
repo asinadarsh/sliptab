@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
-use crate::note::{derive_title, Note};
+use crate::note::{derive_title, valid_color, Note};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
 const MIGRATIONS: &[&str] = &[r#"
@@ -29,10 +29,12 @@ CREATE TABLE sync_queue (
     note_id   TEXT PRIMARY KEY,
     queued_at INTEGER NOT NULL
 );
+"#, r#"
+ALTER TABLE notes ADD COLUMN color TEXT;
 "#];
 
 const NOTE_COLUMNS: &str = "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
-                            device_id, version, conflict_of";
+                            device_id, version, conflict_of, color";
 
 /// The local, offline-first note store. Every write lands here before any sync happens.
 pub struct Store {
@@ -75,10 +77,11 @@ impl Store {
             device_id: self.device_id.clone(),
             version: 1,
             conflict_of: None,
+            color: None,
         };
         let tx = self.conn.transaction()?;
         tx.execute(
-            &format!("INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
+            &format!("INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
             params![
                 note.id.to_string(),
                 note.title,
@@ -91,6 +94,7 @@ impl Store {
                 note.device_id,
                 note.version,
                 note.conflict_of.map(|u| u.to_string()),
+                note.color,
             ],
         )?;
         index_and_queue(&tx, &note, now)?;
@@ -110,6 +114,14 @@ impl Store {
         self.edit(id, |n| n.pinned = pinned)
     }
 
+    /// Tab colour, "#rrggbb" or None. Anything else is rejected.
+    pub fn set_color(&mut self, id: Uuid, color: Option<&str>) -> rusqlite::Result<Note> {
+        if let Some(c) = color.filter(|c| !valid_color(c)) {
+            return Err(rusqlite::Error::InvalidParameterName(format!("not a #rrggbb colour: {c}")));
+        }
+        self.edit(id, |n| n.color = color.map(str::to_owned))
+    }
+
     /// Every edit bumps `version`, stamps time and device, reindexes and queues for sync.
     fn edit(&mut self, id: Uuid, change: impl FnOnce(&mut Note)) -> rusqlite::Result<Note> {
         let tx = self.conn.transaction()?;
@@ -121,7 +133,7 @@ impl Store {
         note.version += 1;
         tx.execute(
             "UPDATE notes SET title=?2, body=?3, pinned=?4, archived=?5, deleted_at=?6, \
-             updated_at=?7, device_id=?8, version=?9 WHERE id=?1",
+             updated_at=?7, device_id=?8, version=?9, color=?10 WHERE id=?1",
             params![
                 id.to_string(),
                 note.title,
@@ -132,6 +144,7 @@ impl Store {
                 note.updated_at,
                 note.device_id,
                 note.version,
+                note.color,
             ],
         )?;
         index_and_queue(&tx, &note, now)?;
@@ -218,6 +231,7 @@ fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
         device_id: r.get(8)?,
         version: r.get(9)?,
         conflict_of: r.get::<_, Option<String>>(10)?.map(|s| parse_uuid(10, &s)).transpose()?,
+        color: r.get(11)?,
     })
 }
 
@@ -266,6 +280,30 @@ mod tests {
         assert_eq!(n2.version, 2);
         assert_eq!(n2.title, "Final");
         assert_eq!(s.get(n.id).unwrap().unwrap(), n2);
+    }
+
+    #[test]
+    fn color_is_stored_and_validated() {
+        let mut s = store();
+        let n = s.create("tab me").unwrap();
+        assert_eq!(s.set_color(n.id, Some("#3b82f6")).unwrap().color.as_deref(), Some("#3b82f6"));
+        assert!(s.set_color(n.id, Some("blue")).is_err());
+        assert_eq!(s.get(n.id).unwrap().unwrap().color.as_deref(), Some("#3b82f6"));
+        assert_eq!(s.set_color(n.id, None).unwrap().color, None);
+    }
+
+    #[test]
+    fn version_1_database_gets_the_color_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO notes (id,title,body,created_at,updated_at,device_id,version) VALUES (?1,'old','old',1,1,'d',1)",
+            [Uuid::now_v7().to_string()],
+        )
+        .unwrap();
+        let s = Store::init(conn, "d".into()).unwrap();
+        assert_eq!(s.list().unwrap()[0].color, None);
     }
 
     #[test]

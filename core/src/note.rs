@@ -21,6 +21,13 @@ pub struct Note {
     pub version: i64,
     /// Set when this note is a conflict copy of another note.
     pub conflict_of: Option<Uuid>,
+    /// Tab colour on the screen edge, "#rrggbb". Kept when unpinned so re-pinning keeps the colour.
+    pub color: Option<String>,
+}
+
+/// Accepts "#rrggbb" only, so a colour from sync or a hand-edited database can't inject CSS.
+pub fn valid_color(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 const MAX_TITLE_CHARS: usize = 120;
@@ -62,6 +69,15 @@ mod tests {
         assert_eq!(derive_title("- [ ] milk\n- [x] bread"), "milk");
         assert_eq!(derive_title("- [x] done thing"), "done thing");
         assert_eq!(derive_title("## Trip ideas"), "Trip ideas");
+    }
+
+    #[test]
+    fn colors_must_be_plain_hex() {
+        assert!(super::valid_color("#f5a524"));
+        assert!(super::valid_color("#ABCDEF"));
+        for bad in ["f5a524", "#f5a52", "#f5a5245", "#zzzzzz", "red", "#fff;}x{"] {
+            assert!(!super::valid_color(bad), "{bad}");
+        }
     }
 
     #[test]

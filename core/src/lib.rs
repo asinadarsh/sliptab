@@ -4,6 +4,6 @@
 mod note;
 mod store;
 
-pub use note::{derive_title, Note};
+pub use note::{derive_title, valid_color, Note};
 pub use store::Store;
 pub use uuid::Uuid;
