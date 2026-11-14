@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use uuid::Uuid;
 
-use crate::link::Link;
+use crate::folders::suggest_folder;
+use crate::link::{clean_url, Link};
+use crate::preview::Preview;
 use crate::note::{derive_title, valid_color, Note};
 use crate::sync::{body_hash, merge, meta_hash, Base, Change, SyncRequest, SyncResponse};
 
@@ -46,6 +48,9 @@ ALTER TABLE notes ADD COLUMN link TEXT;
 "#, r#"
 -- Fields from newer versions of Edge, as a JSON object, kept so this version never strips them.
 ALTER TABLE notes ADD COLUMN extra TEXT;
+"#, r#"
+-- Failed details fetches for saves, this device only (not synced): when to try again.
+CREATE TABLE fetch_attempts (note_id TEXT PRIMARY KEY, tries INTEGER NOT NULL, next_at INTEGER NOT NULL);
 "#];
 
 const NOTE_COLUMNS: &str = "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
@@ -138,6 +143,102 @@ impl Store {
     pub fn mark_opened(&mut self, id: Uuid) -> rusqlite::Result<Note> {
         let now = now_ms();
         self.edit_link(id, |l| l.opened_at = Some(now))
+    }
+
+    /// Saves whose details have not been fetched yet and are due (not waiting after a failure),
+    /// oldest first.
+    pub fn saves_needing_details(&self, limit: usize) -> rusqlite::Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {NOTE_COLUMNS} FROM notes WHERE deleted_at IS NULL AND link IS NOT NULL \
+             AND json_extract(link, '$.fetched_at') IS NULL \
+             AND id NOT IN (SELECT note_id FROM fetch_attempts WHERE next_at > ?1) \
+             ORDER BY created_at LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![now_ms(), limit as i64], note_from_row)?;
+        rows.collect()
+    }
+
+    /// Records what the post's page said and, unless the user already chose one, picks a folder.
+    /// When the page names the post's own address (a Threads short link's target), the save takes
+    /// it; if that post was already saved, this copy is deleted and the earlier save returned.
+    pub fn set_save_details(&mut self, id: Uuid, p: &Preview) -> rusqlite::Result<Note> {
+        let now = now_ms();
+        let note = self.get(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let link = note.link.clone().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let canonical = p
+            .canonical
+            .as_deref()
+            .and_then(clean_url)
+            .filter(|c| crate::link::platform_of(c) == link.platform && *c != link.url);
+        if let Some(c) = &canonical {
+            if let Some(other) = self.live_save_with_url(c, id)? {
+                self.delete(id)?;
+                return Ok(other);
+            }
+        }
+        let body = note.body.clone();
+        let updated = self.edit_link(id, |l| {
+            if let Some(c) = canonical {
+                l.url = c;
+            }
+            (l.title, l.author, l.text, l.thumbnail) = (p.title.clone(), p.author.clone(), p.text.clone(), p.thumbnail.clone());
+            l.fetched_at = Some(now);
+            if l.folder.is_none() {
+                let words = [l.title.as_deref(), l.text.as_deref(), Some(body.as_str())];
+                l.folder = suggest_folder(&l.platform, &words.into_iter().flatten().collect::<Vec<_>>()).map(str::to_owned);
+            }
+        })?;
+        self.conn.execute("DELETE FROM fetch_attempts WHERE note_id = ?1", [id.to_string()])?;
+        Ok(updated)
+    }
+
+    /// A fetch failed (offline, server error): try again later, waiting longer each time. After
+    /// the last try the save is marked fetched with what it has, so devices stop trying.
+    pub fn record_fetch_failure(&mut self, id: Uuid) -> rusqlite::Result<()> {
+        const WAIT_MS: [i64; 5] = [60_000, 600_000, 3_600_000, 21_600_000, 86_400_000];
+        let tries: i64 = self
+            .conn
+            .query_row("SELECT tries FROM fetch_attempts WHERE note_id = ?1", [id.to_string()], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
+        if tries as usize >= WAIT_MS.len() {
+            self.set_save_details(id, &Preview::default())?;
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO fetch_attempts (note_id, tries, next_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(note_id) DO UPDATE SET tries = excluded.tries, next_at = excluded.next_at",
+            params![id.to_string(), tries + 1, now_ms() + WAIT_MS[tries as usize]],
+        )?;
+        Ok(())
+    }
+
+    /// Folders that hold at least one visible save, with counts: the default folders in their
+    /// order first, then the user's own alphabetically. Unsorted saves are not counted.
+    pub fn save_folders(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(link, '$.folder') AS f, COUNT(*) FROM notes \
+             WHERE archived = 0 AND deleted_at IS NULL AND link IS NOT NULL AND f IS NOT NULL GROUP BY f",
+        )?;
+        let mut v: Vec<(String, i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        let rank = |f: &str| crate::folders::FOLDERS.iter().position(|d| *d == f).unwrap_or(usize::MAX);
+        v.sort_by(|a, b| (rank(&a.0), &a.0).cmp(&(rank(&b.0), &b.0)));
+        Ok(v)
+    }
+
+    fn live_save_with_url(&self, url: &str, except: Uuid) -> rusqlite::Result<Option<Note>> {
+        let id = self
+            .conn
+            .query_row(
+                "SELECT id FROM notes WHERE deleted_at IS NULL AND json_extract(link, '$.url') = ?1 AND id != ?2",
+                params![url, except.to_string()],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => self.get(parse_uuid(0, &id)?),
+            None => Ok(None),
+        }
     }
 
     fn edit_link(&mut self, id: Uuid, change: impl FnOnce(&mut Link)) -> rusqlite::Result<Note> {
@@ -547,6 +648,68 @@ mod tests {
         assert_eq!(s.list().unwrap()[0].body, "old");
         assert!(s.create_save("https://example.com/a").unwrap().1);
         std::fs::remove_file(&path).ok();
+    }
+
+    fn preview(title: &str, canonical: Option<&str>) -> Preview {
+        Preview { title: Some(title.into()), text: Some(title.into()), canonical: canonical.map(Into::into), ..Preview::default() }
+    }
+
+    #[test]
+    fn details_fill_the_save_pick_a_folder_and_make_it_searchable() {
+        let mut s = store();
+        let (v, _) = s.create_save("https://www.instagram.com/reel/DftSYUwtKNT/").unwrap();
+        assert_eq!(s.saves_needing_details(10).unwrap().len(), 1);
+        let n = s.set_save_details(v.id, &preview("5 minute dal recipe", None)).unwrap();
+        let l = n.link.unwrap();
+        assert_eq!((l.title.as_deref(), l.folder.as_deref()), (Some("5 minute dal recipe"), Some("Recipes")));
+        assert!(l.fetched_at.is_some());
+        assert!(s.saves_needing_details(10).unwrap().is_empty());
+        assert_eq!(s.search_saves("dal").unwrap()[0].id, v.id);
+        assert_eq!(s.save_folders().unwrap(), vec![("Recipes".to_string(), 1)]);
+    }
+
+    #[test]
+    fn a_folder_the_user_chose_is_kept() {
+        let mut s = store();
+        let (v, _) = s.create_save("https://x.com/a/status/1").unwrap();
+        s.set_save_folder(v.id, Some("Gifts for Maa")).unwrap();
+        let n = s.set_save_details(v.id, &preview("new workout plan", None)).unwrap();
+        assert_eq!(n.link.unwrap().folder.as_deref(), Some("Gifts for Maa"));
+    }
+
+    #[test]
+    fn a_threads_short_link_takes_the_post_address_and_duplicates_collapse() {
+        let mut s = store();
+        let post = "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv";
+        let (a, _) = s.create_save("https://www.threads.com/share/_7fwIRJAV").unwrap();
+        let a2 = s.set_save_details(a.id, &preview("Meta open sourced", Some(&format!("{post}?xmt=1")))).unwrap();
+        assert_eq!(a2.link.unwrap().url, post);
+        // Sharing the same post again gives a new short link; once fetched it folds into the first.
+        let (b, new) = s.create_save("https://www.threads.com/share/_oANR7c7l").unwrap();
+        assert!(new);
+        let kept = s.set_save_details(b.id, &preview("Meta open sourced", Some(post))).unwrap();
+        assert_eq!(kept.id, a.id);
+        assert_eq!(s.saves().unwrap().len(), 1);
+        // A canonical address on another site is not trusted.
+        let (c, _) = s.create_save("https://x.com/a/status/2").unwrap();
+        let c2 = s.set_save_details(c.id, &preview("t", Some("https://evil.example/x"))).unwrap();
+        assert_eq!(c2.link.unwrap().url, "https://x.com/a/status/2");
+    }
+
+    #[test]
+    fn failed_fetches_wait_then_give_up() {
+        let mut s = store();
+        let (v, _) = s.create_save("https://www.youtube.com/watch?v=hdMszZ2ah5Q").unwrap();
+        s.record_fetch_failure(v.id).unwrap();
+        assert!(s.saves_needing_details(10).unwrap().is_empty(), "waits a minute after a failure");
+        s.conn.execute("UPDATE fetch_attempts SET next_at = 0", []).unwrap();
+        assert_eq!(s.saves_needing_details(10).unwrap().len(), 1, "due again");
+        for _ in 0..5 {
+            s.record_fetch_failure(v.id).unwrap();
+        }
+        let l = s.get(v.id).unwrap().unwrap().link.unwrap();
+        assert!(l.fetched_at.is_some(), "stops trying after the last wait");
+        assert_eq!(l.folder.as_deref(), Some("Watch Later"), "folder by platform when nothing was read");
     }
 
     #[test]

@@ -135,6 +135,71 @@ impl Client {
     }
 }
 
+/// Who we say we are when reading a saved post's page. Instagram shows its preview tags to a
+/// link-preview bot but not to a phone browser (S0 test), and being honest about it is right.
+const PREVIEW_AGENT: &str = "EdgeBot/0.1 (link preview; +https://edge-sync.forcesync.in)";
+const MAX_PAGE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Reads what a saved post's page says about itself. Ok with an empty preview when the post is
+/// gone or private (nothing more to learn); Err when it is worth trying again later.
+pub fn fetch_preview(link: &crate::Link) -> std::result::Result<crate::preview::Preview, String> {
+    use crate::preview::{parse_html, parse_youtube_oembed, Preview};
+    use ureq::ResponseExt;
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .max_redirects(5)
+        .user_agent(PREVIEW_AGENT)
+        .build()
+        .into();
+    let url = if link.platform == "youtube" {
+        format!("https://www.youtube.com/oembed?format=json&url={}", percent_encode(&link.url))
+    } else {
+        link.url.clone()
+    };
+    let mut resp = agent
+        .get(&url)
+        .header("accept-language", "en-IN,en;q=0.9")
+        .header("accept", "text/html,application/json;q=0.9,*/*;q=0.8")
+        .call()
+        .map_err(|e| e.to_string())?;
+    match resp.status().as_u16() {
+        200 => {}
+        429 | 500..=599 => return Err(format!("HTTP {}", resp.status())),
+        _ => return Ok(Preview::default()), // 404 deleted, 401/403 private: nothing to read
+    }
+    let final_url = resp.get_uri().to_string();
+    let body = resp.body_mut().with_config().limit(MAX_PAGE_BYTES).lossy_utf8(true).read_to_string().map_err(|e| e.to_string())?;
+    Ok(if link.platform == "youtube" { parse_youtube_oembed(&body) } else { parse_html(&link.platform, &final_url, &body) })
+}
+
+/// Fetches details for up to `max` saves that need them, one at a time, never holding the store
+/// lock during a fetch. Returns how many saves changed.
+pub fn fill_details(store: &Mutex<Store>, max: usize) -> usize {
+    let Ok(pending) = lock(store).saves_needing_details(max) else { return 0 };
+    let mut changed = 0;
+    for n in pending {
+        let Some(link) = n.link else { continue };
+        let result = fetch_preview(&link);
+        let mut s = lock(store);
+        let ok = match result {
+            Ok(p) => s.set_save_details(n.id, &p).is_ok(),
+            Err(_) => s.record_fetch_failure(n.id).map(|_| false).unwrap_or(false),
+        };
+        changed += ok as usize;
+    }
+    changed
+}
+
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }

@@ -1,8 +1,10 @@
 //! Shared core for Edge: the note model and the local SQLite store.
 //! Used by the desktop app, the mobile app (via flutter_rust_bridge) and the server.
 
+pub mod folders;
 mod link;
 mod note;
+pub mod preview;
 #[cfg(feature = "store")]
 mod store;
 pub mod sync;
