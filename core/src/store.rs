@@ -186,6 +186,19 @@ impl Store {
         Ok(plan)
     }
 
+    /// For the success test: of the saves made since `since` (ms), how many there are, how many
+    /// were opened again from Edge, and how many are done.
+    pub fn save_stats(&self, since: i64) -> rusqlite::Result<(i64, i64, i64)> {
+        self.conn.query_row(
+            "SELECT COUNT(*), \
+                    COUNT(json_extract(link, '$.opened_at')), \
+                    COALESCE(SUM(CASE WHEN json_extract(link, '$.done') THEN 1 ELSE 0 END), 0) \
+             FROM notes WHERE deleted_at IS NULL AND link IS NOT NULL AND created_at >= ?1",
+            [since],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+    }
+
     /// A random save that is not done, for "surprise me".
     pub fn random_save(&self) -> rusqlite::Result<Option<Note>> {
         self.conn
@@ -736,6 +749,19 @@ mod tests {
         assert_eq!(plan[1][0].id, opened);
         assert_eq!(s.digest_plan(today, 1, 3).unwrap()[0].len(), 3);
         assert!(s.random_save().unwrap().is_some_and(|n| n.id != done));
+    }
+
+    #[test]
+    fn stats_count_saves_opens_and_dones_since_a_time() {
+        let mut s = store();
+        let now = 100 * DAY;
+        let a = aged_save(&mut s, "https://x.com/a/status/1", now, 2);
+        let b = aged_save(&mut s, "https://x.com/a/status/2", now, 3);
+        aged_save(&mut s, "https://x.com/a/status/3", now, 10);
+        s.create("a note").unwrap();
+        s.mark_opened(a).unwrap();
+        s.set_save_done(b, true).unwrap();
+        assert_eq!(s.save_stats(now - 7 * DAY).unwrap(), (2, 1, 1));
     }
 
     #[test]
