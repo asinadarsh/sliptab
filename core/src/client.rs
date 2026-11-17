@@ -106,6 +106,12 @@ impl Client {
         read::<serde::de::IgnoredAny>(resp).map(|_| ())
     }
 
+    /// Deletes the account and everything synced to it. Local notes on this device stay.
+    pub fn delete_account(&self, token: &str) -> Result<()> {
+        let resp = self.agent.delete(format!("{}/v1/me", self.base)).header("authorization", bearer(token)).call();
+        read::<serde::de::IgnoredAny>(resp).map(|_| ())
+    }
+
     /// Sends every queued change and fetches everything new, repeating until both are done.
     /// Returns how many notes arrived from other devices.
     pub fn sync(&self, store: &Mutex<Store>, token: &str) -> Result<usize> {
