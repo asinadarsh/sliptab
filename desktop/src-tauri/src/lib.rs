@@ -128,6 +128,19 @@ fn save_set_folder(s: State<Notes>, id: Uuid, folder: Option<String>, sync: Stat
     Ok(n)
 }
 
+/// The saves to bring back today; `today_start` is local midnight in ms.
+#[tauri::command]
+fn saves_today(s: State<Notes>, today_start: i64) -> CmdResult<Vec<Note>> {
+    with_store(&s, |st| st.digest_plan(today_start, 1, 3)).map(|mut p| p.remove(0))
+}
+
+#[tauri::command]
+fn save_set_done(s: State<Notes>, id: Uuid, done: bool, sync: State<SyncState>) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.set_save_done(id, done))?;
+    sync.kick(false);
+    Ok(n)
+}
+
 #[tauri::command]
 fn save_open(s: State<Notes>, id: Uuid, sync: State<SyncState>) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.mark_opened(id))?;
@@ -373,6 +386,8 @@ pub fn run() {
             saves_search,
             save_folders,
             save_set_folder,
+            saves_today,
+            save_set_done,
             save_create,
             save_open,
             set_tab_count,

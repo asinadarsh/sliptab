@@ -33,6 +33,8 @@
   let found: Note[] = $state([]); // saves matching the search
   let folders: [string, number][] = $state([]);
   let defaultFolders: string[] = $state([]);
+  let today: Note[] = $state([]); // saves to bring back today, also the bookmark tab on the edge
+  let pendingSaved = false; // the edge's bookmark tab was clicked: open on Saved
   let folder: string | null = $state(null); // the chosen folder chip; null: all, "" : unsorted
   const saves = $derived(folder === null ? found : found.filter((n) => (n.link?.folder ?? "") === folder));
   const unsorted = $derived(allSaves.filter((n) => !n.link?.folder).length);
@@ -79,7 +81,7 @@
   const sections = $derived(toSections(notes, query.trim() !== ""));
   const flat = $derived(sections.flatMap((s) => s.notes));
   const edgeItems = $derived(edgeTabs(all));
-  const tabCount = $derived(edgeItems.tabs.length + (edgeItems.more ? 1 : 0));
+  const tabCount = $derived(edgeItems.tabs.length + (edgeItems.more ? 1 : 0) + (today.length ? 1 : 0));
   // Keep in step with edge.rs: BAR_HEIGHT 120, TAB_HEIGHT 36, TAB_GAP 6.
   const stripHeight = $derived(120 + tabCount * 42);
   const views = { cards: Cards, compact: Compact, sticky: Sticky };
@@ -173,6 +175,16 @@
       // shows the list for a frame and then jumps to the editor.
       const target = pendingOpen;
       pendingOpen = null;
+      if (pendingSaved) {
+        pendingSaved = false;
+        settingsOpen = false;
+        if (editing) void flushSave();
+        editing = null;
+        tab = "saved";
+        folder = null;
+        query = "";
+        void refresh();
+      }
       if (target) {
         settingsOpen = false;
         if (editing && draft !== editing.body) void flushSave();
@@ -228,6 +240,9 @@
     allSaves = await invoke<Note[]>("saves_list");
     found = query.trim() && tab === "saved" ? await invoke<Note[]>("saves_search", { query }) : allSaves;
     [folders, defaultFolders] = await invoke<[[string, number][], string[]]>("save_folders");
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
+    today = await invoke<Note[]>("saves_today", { todayStart: midnight.getTime() });
     if (folder && !folders.some(([f]) => f === folder)) folder = null;
     if (folder === "" && !allSaves.some((n) => !n.link?.folder)) folder = null;
     if (!flat.some((n) => n.id === selectedId)) selectedId = flat[0]?.id ?? null;
@@ -295,6 +310,11 @@
     await invoke("save_set_folder", { id: n.id, folder: to === "" ? null : name });
     await refresh();
     return true;
+  }
+
+  async function markDone(n: Note) {
+    await invoke("save_set_done", { id: n.id, done: !n.link?.done });
+    await refresh();
   }
 
   async function deleteSave(n: Note) {
@@ -566,6 +586,38 @@
   </nav>
 {/snippet}
 
+{#snippet saveRow(n: Note, forToday: boolean)}
+      {@const l = n.link!}
+      {@const p = PLATFORMS[l.platform]}
+      <div class="save" class:done={l.done} data-id={n.id}>
+        <button class="open" onclick={() => openSave(n)} title="Open in {platformName(l)}">
+          <span class="lead">
+            {#if l.thumbnail}
+              <img src={l.thumbnail} alt="" loading="lazy" referrerpolicy="no-referrer" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")} />
+            {/if}
+            <span class="mark" class:small={!!l.thumbnail} class:mono={p?.color === "#101010"} style:--c={p?.color ?? "var(--accent)"}>{p?.mark ?? "↗"}</span>
+          </span>
+          <span class="body">
+            <span class="st">{saveTitle(n)}</span>
+            <span class="meta">{platformName(l)}{l.author ? ` · ${l.author}` : ""} · {ago(n.created_at)}{l.done ? " · done" : l.opened_at ? " · opened" : ""}{folder === null && l.folder ? ` · ${l.folder}` : ""}</span>
+          </span>
+        </button>
+        <select class="move" aria-label="Folder" title="Move to a folder" value={l.folder ?? ""}
+          onchange={(e) => {
+            const el = e.currentTarget as HTMLSelectElement;
+            void moveSave(n, el.value).then((moved) => { if (!moved) el.value = l.folder ?? ""; });
+          }}>
+          <option value="">Unsorted</option>
+          {#each [...new Set([...defaultFolders, ...folders.map(([f]) => f), ...(l.folder ? [l.folder] : [])])] as f (f)}
+            <option value={f}>{f}</option>
+          {/each}
+          <option value={"\u0001new"}>New folder…</option>
+        </select>
+        <button class="ib del" class:keep={forToday} onclick={() => markDone(n)} aria-label={l.done ? "Not done" : "Mark done"} title={l.done ? "Not done" : "Done"}><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button>
+        <button class="ib del" onclick={() => deleteSave(n)} aria-label="Delete save" title="Delete"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+{/snippet}
+
 {#snippet capture(variant: "big" | "slim" | "tile")}
   <div class="capture {variant}">
     <textarea
@@ -613,6 +665,12 @@
     {#if edgeItems.more}
       <button class="tab more" data-edge="bar" onclick={() => edge.click()} aria-label="{edgeItems.more} more pinned notes">
         <span>+{edgeItems.more}</span>
+      </button>
+    {/if}
+    {#if today.length}
+      <button class="tab saved" data-edge="tab" onclick={() => { pendingSaved = true; edge.click(); }}
+        aria-label="{today.length} saves to come back to" title="{today.length} saves to come back to today">
+        <span>{today.length}</span>
       </button>
     {/if}
     <button class="bar" data-edge="bar" onclick={() => edge.click()} aria-label="Open notes ({all.length}){arrived ? ', new from another device' : ''}">
@@ -778,35 +836,15 @@
         </div>
       {/if}
       <div class="saves">
+        {#if today.length && folder === null && !query.trim()}
+          <div class="sec">For today</div>
+          {#each today as n (n.id)}
+            {@render saveRow(n, true)}
+          {/each}
+          <div class="sec">All saves</div>
+        {/if}
         {#each saves as n (n.id)}
-          {@const l = n.link!}
-          {@const p = PLATFORMS[l.platform]}
-          <div class="save" data-id={n.id}>
-            <button class="open" onclick={() => openSave(n)} title="Open in {platformName(l)}">
-              <span class="lead">
-                {#if l.thumbnail}
-                  <img src={l.thumbnail} alt="" loading="lazy" referrerpolicy="no-referrer" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.display = "none")} />
-                {/if}
-                <span class="mark" class:small={!!l.thumbnail} class:mono={p?.color === "#101010"} style:--c={p?.color ?? "var(--accent)"}>{p?.mark ?? "↗"}</span>
-              </span>
-              <span class="body">
-                <span class="st">{saveTitle(n)}</span>
-                <span class="meta">{platformName(l)}{l.author ? ` · ${l.author}` : ""} · {ago(n.created_at)}{l.opened_at ? " · opened" : ""}{folder === null && l.folder ? ` · ${l.folder}` : ""}</span>
-              </span>
-            </button>
-            <select class="move" aria-label="Folder" title="Move to a folder" value={l.folder ?? ""}
-              onchange={(e) => {
-                const el = e.currentTarget as HTMLSelectElement;
-                void moveSave(n, el.value).then((moved) => { if (!moved) el.value = l.folder ?? ""; });
-              }}>
-              <option value="">Unsorted</option>
-              {#each [...new Set([...defaultFolders, ...folders.map(([f]) => f), ...(l.folder ? [l.folder] : [])])] as f (f)}
-                <option value={f}>{f}</option>
-              {/each}
-              <option value={"\u0001new"}>New folder…</option>
-            </select>
-            <button class="ib del" onclick={() => deleteSave(n)} aria-label="Delete save" title="Delete"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
-          </div>
+          {@render saveRow(n, false)}
         {:else}
           <div class="empty">{query ? "No matches" : "Share a post to Edge on your phone, or paste a link below. Saves land here."}</div>
         {/each}
@@ -843,6 +881,9 @@
   .st { font-weight: 500; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; }
   .meta { color: var(--faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .save .del { opacity: 0; margin-right: 4px; }
+  .save .del.keep { opacity: 0.7; }
+  .save.done { opacity: 0.55; }
+  .saves .sec { font-size: 11px; font-weight: 600; color: var(--faint); padding: 10px 8px 4px; letter-spacing: .05em; text-transform: uppercase; }
   .save:hover .del, .save .del:focus-visible { opacity: 1; }
   .folders { display: flex; gap: 6px; overflow-x: auto; padding: 0 2px 8px; scrollbar-width: none; }
   .folders button { font: inherit; font-size: 12px; white-space: nowrap; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: none; color: var(--muted); }
@@ -945,6 +986,12 @@
     background: var(--bar);
     opacity: 0.7;
   }
+  .tab.saved {
+    background: var(--accent);
+    display: grid;
+    place-items: center;
+  }
+  .tab.saved span,
   .tab.more span,
   .bar span {
     writing-mode: vertical-rl;

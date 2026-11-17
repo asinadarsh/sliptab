@@ -11,8 +11,8 @@ const BAR_WIDTH: f64 = 8.0;
 const BAR_HEIGHT: f64 = 120.0;
 const TAB_HEIGHT: f64 = 36.0;
 const TAB_GAP: f64 = 6.0;
-/// Six note tabs plus one "+N" tab at most.
-pub const MAX_TABS: usize = 7;
+/// Six note tabs, one "+N" tab and the saves-for-today tab at most.
+pub const MAX_TABS: usize = 8;
 
 fn strip_height(tabs: usize) -> f64 {
     BAR_HEIGHT + tabs.min(MAX_TABS) as f64 * (TAB_HEIGHT + TAB_GAP)
@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(r.h, 120 + 3 * 42);
         assert_eq!(r.y, 32 + (1048 - r.h as i32) / 2);
         let capped = super::edge_rect(WORK, 1.0, false, &Settings::default(), 50);
-        assert_eq!(capped.h, 120 + 7 * 42);
+        assert_eq!(capped.h, 120 + super::MAX_TABS as u32 * 42);
         let tiny = Rect { x: 0, y: 0, w: 800, h: 200 };
         assert_eq!(super::edge_rect(tiny, 1.0, false, &Settings::default(), 7).h, 200);
     }
