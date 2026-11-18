@@ -179,6 +179,12 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, p
 fn place_windows(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, peek: Option<Local>, scale: f64) -> tauri::Result<()> {
     use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW};
+    // A resizable borderless window gets Tauri's invisible drag-to-resize strip along its edges
+    // (a child window, TAURI_DRAG_RESIZE_BORDERS). Our bar sits on that edge, so the strip took
+    // every hover and click. The panel is not user-resizable, and set_size still works.
+    if window.is_resizable()? {
+        window.set_resizable(false)?;
+    }
     let hwnd = window.hwnd()?.0 as windows_sys::Win32::Foundation::HWND;
     let size = window.outer_size()?;
     let pos = window.outer_position()?;
