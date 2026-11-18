@@ -22,3 +22,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # Starts the real app on a Windows desktop and checks the edge window with the Win32 API:
+  # placement, click-through outside the bar, hover to open and close. Screenshots as artifact.
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run tauri build -- --debug --no-bundle
+        working-directory: desktop
+      - run: powershell -ExecutionPolicy Bypass -File desktop\scripts\windows-smoke.ps1
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-screenshots
+          path: |
+            smoke-*.png
+            smoke-app.log
+          if-no-files-found: ignore

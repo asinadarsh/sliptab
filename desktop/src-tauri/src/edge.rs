@@ -82,18 +82,33 @@ pub fn place(
             return Ok(Some(r));
         }
     }
-    // ponytail: elsewhere the window resizes to the bar, so the preview card has no room to be
-    // clickable yet; per-OS edge windows (Windows/macOS phase) will fix that.
-    #[cfg(not(target_os = "linux"))]
-    let _ = peek;
+    #[cfg(windows)]
+    {
+        let panel = edge_rect(work, scale, true, s, tabs);
+        let input = (!expanded).then(|| s.show_bar.then(|| edge_rect(work, scale, false, s, tabs)));
+        place_windows(window, panel, input, peek, scale)?;
+        Ok(Some(r))
+    }
+    #[cfg(not(windows))]
+    {
+        // ponytail: macOS (and Wayland without XWayland) still resize the window to the bar, so
+        // the preview card has no room to be clickable; macOS gets its own edge window later.
+        let _ = peek;
+        place_by_resizing(window, r, expanded || s.show_bar)?;
+        Ok(Some(r))
+    }
+}
+
+#[cfg(not(windows))]
+fn place_by_resizing(window: &WebviewWindow, r: Rect, visible: bool) -> tauri::Result<()> {
     window.set_size(PhysicalSize::new(r.w, r.h))?;
     window.set_position(PhysicalPosition::new(r.x, r.y))?;
-    if expanded || s.show_bar {
+    if visible {
         window.show()?;
     } else {
         window.hide()?; // hotkey-only mode
     }
-    Ok(Some(r))
+    Ok(())
 }
 
 /// X11 (incl. GNOME's XWayland): the window always stays panel-sized and transparent, and only its
@@ -152,6 +167,81 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, p
     });
     gtk_window.input_shape_combine_region(region.as_ref());
     Ok(true)
+}
+
+/// Windows: the same idea as X11. The window always stays panel-sized and transparent; its window
+/// region is just the bar when collapsed (clicks outside it reach the windows underneath, as the
+/// region is all of the window that exists for hit-testing) and the whole panel when expanded.
+/// Never resizing means opening never shows an unpainted frame. Also makes it a tool window, so it
+/// stays out of Alt+Tab and the taskbar.
+/// `input`: None = expanded; Some(None) = collapsed, bar hidden; Some(Some(bar)) = collapsed.
+#[cfg(windows)]
+fn place_windows(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, peek: Option<Local>, scale: f64) -> tauri::Result<()> {
+    use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW};
+    // A resizable borderless window gets Tauri's invisible drag-to-resize strip along its edges
+    // (a child window, TAURI_DRAG_RESIZE_BORDERS). Our bar sits on that edge, so the strip took
+    // every hover and click. The panel is not user-resizable, and set_size still works.
+    if window.is_resizable()? {
+        window.set_resizable(false)?;
+    }
+    let hwnd = window.hwnd()?.0 as windows_sys::Win32::Foundation::HWND;
+    let size = window.outer_size()?;
+    let pos = window.outer_position()?;
+    if (size.width, size.height) != (panel.w, panel.h) {
+        window.set_size(PhysicalSize::new(panel.w, panel.h))?;
+    }
+    if (pos.x, pos.y) != (panel.x, panel.y) {
+        window.set_position(PhysicalPosition::new(panel.x, panel.y))?;
+    }
+    // SAFETY: hwnd is this app's live top-level window, on the main thread (Tauri commands for
+    // the window run there). Regions passed to SetWindowRgn belong to the system afterwards;
+    // the temporary peek region is deleted here.
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let want = (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
+        if ex != want {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+        }
+        let region = match input {
+            None => std::ptr::null_mut(), // the whole window
+            Some(None) => CreateRectRgn(0, 0, 0, 0),
+            Some(Some(b)) => {
+                let bx = if b.x == panel.x { 0 } else { panel.w as i32 - b.w as i32 };
+                let by = b.y - panel.y;
+                let r = CreateRectRgn(bx, by, bx + b.w as i32, by + b.h as i32);
+                if let Some(p) = peek {
+                    let px = |v: f64| (v * scale).round() as i32;
+                    let card = CreateRectRgn(px(p.x), px(p.y), px(p.x + p.w), px(p.y + p.h));
+                    CombineRgn(r, r, card, RGN_OR);
+                    DeleteObject(card);
+                }
+                r
+            }
+        };
+        SetWindowRgn(hwnd, region, 1);
+    }
+    window.show()?;
+    Ok(())
+}
+
+/// The window that had focus before the panel took it, to give focus back on collapse.
+#[cfg(windows)]
+static PREVIOUS_FOREGROUND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Takes keyboard focus for the panel, remembering on Windows which window had it.
+pub fn take_focus(window: &WebviewWindow) -> tauri::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        let ours = window.hwnd()?.0 as isize;
+        // SAFETY: reads which window is in front; no pointer is dereferenced.
+        let front = unsafe { GetForegroundWindow() } as isize;
+        if front != 0 && front != ours {
+            PREVIOUS_FOREGROUND.store(front, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    window.set_focus()
 }
 
 /// Forward the toplevel window's own pointer crossings to the webview as `edge-pointer` events
@@ -244,7 +334,18 @@ pub fn release_focus(window: &WebviewWindow) -> tauri::Result<bool> {
     Ok(true)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Windows: hand focus back to the window the user was in before the panel took it, so typing
+/// after the panel closes goes there instead of into the hidden search box.
+#[cfg(windows)]
+pub fn release_focus(_window: &WebviewWindow) -> tauri::Result<bool> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+    let prev = PREVIOUS_FOREGROUND.swap(0, std::sync::atomic::Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: IsWindow checks the handle is still a live window before it is used; we are the
+    // foreground process, which Windows requires for SetForegroundWindow to succeed.
+    Ok(!prev.is_null() && unsafe { IsWindow(prev) != 0 && SetForegroundWindow(prev) != 0 })
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn release_focus(_window: &WebviewWindow) -> tauri::Result<bool> {
     Ok(false)
 }

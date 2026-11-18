@@ -171,7 +171,7 @@ fn set_expanded(
     state.expanded.store(expanded, Ordering::Relaxed);
     state.place(&window, &current_settings(&s)?)?;
     if expanded && focus {
-        window.set_focus().map_err(|e| e.to_string())?;
+        edge::take_focus(&window).map_err(|e| e.to_string())?;
     }
     if !expanded && window.is_focused().unwrap_or(false) {
         edge::release_focus(&window).map_err(|e| e.to_string())?;
@@ -194,7 +194,8 @@ struct Platform {
 
 #[tauri::command]
 fn platform() -> Platform {
-    let x11 = cfg!(target_os = "linux") && edge::backend() == "x11";
+    // X11 and Windows keep the window panel-sized and change only its input region.
+    let x11 = (cfg!(target_os = "linux") && edge::backend() == "x11") || cfg!(windows);
     Platform {
         focus_on_hover: false,
         fixed_window: x11,
@@ -221,7 +222,7 @@ fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String)
 /// Clicking a dock window does not focus it on GNOME, so the panel asks when you click in it.
 #[tauri::command]
 fn focus_panel(window: WebviewWindow) -> CmdResult<()> {
-    window.set_focus().map_err(|e| e.to_string())
+    edge::take_focus(&window).map_err(|e| e.to_string())
 }
 
 /// The page reports how many tabs it draws, so the window/input area matches the strip.
@@ -405,6 +406,7 @@ pub fn run() {
             sync::sync_status,
             sync::sync_sign_in_google,
             sync::sync_sign_out,
+            sync::sync_delete_account,
             sync::sync_now
         ])
         .run(tauri::generate_context!())

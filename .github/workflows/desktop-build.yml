@@ -32,6 +32,11 @@ jobs:
         working-directory: desktop
       - run: npm run tauri build -- --bundles ${{ matrix.bundles }}
         working-directory: desktop
+        env:
+          # Baked in at compile time (option_env!), so the installers can sign in with Google.
+          # Google treats a desktop client's secret as not confidential; it still stays out of the repo.
+          EDGE_GOOGLE_CLIENT_ID: ${{ secrets.EDGE_GOOGLE_CLIENT_ID }}
+          EDGE_GOOGLE_CLIENT_SECRET: ${{ secrets.EDGE_GOOGLE_CLIENT_SECRET }}
       - uses: actions/upload-artifact@v4
         with:
           name: edge-${{ matrix.os }}

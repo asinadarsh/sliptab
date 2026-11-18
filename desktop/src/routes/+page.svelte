@@ -444,6 +444,10 @@
   // Opens the browser at Google; resolves when the user is back and signed in.
   const signInGoogle = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_in_google")));
   const signOutSync = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_out")));
+  const deleteAccount = () => {
+    if (!confirm(`Delete the Edge account ${sync.email}? Everything synced to it is deleted from the server and every device is signed out. Notes on this laptop stay.`)) return;
+    void syncStep(async () => void (sync = await invoke<SyncStatus>("sync_delete_account")));
+  };
 
   async function openSettings() {
     settingsOpen = true;
@@ -521,6 +525,7 @@
   const log = (msg: string) => void invoke("debug_log", { msg });
 
   onMount(() => {
+    log("page ready");
     invoke<{ focusOnHover: boolean; fixedWindow: boolean; os: typeof os }>("platform").then((p) => {
       focusOnHover = p.focusOnHover;
       fixedWindow = p.fixedWindow;
@@ -644,7 +649,10 @@
   class:left={cfg.side === "left"}
   style:--accent={cfg.barColor ?? "#3b82f6"}
   style:--bar={cfg.barColor ?? "#8a8f99"}
-  onmouseenter={(e) => domPointerAt(e.clientX, e.clientY, true)}
+  onmouseenter={(e) => {
+    log(`mouseenter ${e.clientX},${e.clientY}`); // debug builds only: the Windows smoke test reads it
+    domPointerAt(e.clientX, e.clientY, true);
+  }}
   onmouseleave={() => {
     hoverTab = null;
     edge.pointerLeave();
@@ -728,6 +736,10 @@
           <section class="setting">
             <div class="grow sub">Notes stay on this laptop if you sign out.</div>
             <button class="pill" disabled={syncBusy} onclick={signOutSync}>Sign out</button>
+          </section>
+          <section class="setting">
+            <div class="grow sub">Delete the account and everything synced to it.</div>
+            <button class="pill danger" disabled={syncBusy} onclick={deleteAccount}>Delete account</button>
           </section>
         {:else}
           <section class="setting col">
@@ -866,6 +878,7 @@
 </main>
 
 <style>
+  .pill.danger { color: #e5484d; }
   .tabs { display: flex; gap: 4px; padding: 0 2px 8px; }
   .tabs button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; color: var(--muted); background: none; }
   .tabs button:hover { background: var(--surface-2); }
