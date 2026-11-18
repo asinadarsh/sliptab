@@ -444,6 +444,10 @@
   // Opens the browser at Google; resolves when the user is back and signed in.
   const signInGoogle = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_in_google")));
   const signOutSync = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_out")));
+  const deleteAccount = () => {
+    if (!confirm(`Delete the Edge account ${sync.email}? Everything synced to it is deleted from the server and every device is signed out. Notes on this laptop stay.`)) return;
+    void syncStep(async () => void (sync = await invoke<SyncStatus>("sync_delete_account")));
+  };
 
   async function openSettings() {
     settingsOpen = true;
@@ -729,6 +733,10 @@
             <div class="grow sub">Notes stay on this laptop if you sign out.</div>
             <button class="pill" disabled={syncBusy} onclick={signOutSync}>Sign out</button>
           </section>
+          <section class="setting">
+            <div class="grow sub">Delete the account and everything synced to it.</div>
+            <button class="pill danger" disabled={syncBusy} onclick={deleteAccount}>Delete account</button>
+          </section>
         {:else}
           <section class="setting col">
             <div class="sub">Get your phone's notes here. Free for 14 days, no card needed.</div>
@@ -866,6 +874,7 @@
 </main>
 
 <style>
+  .pill.danger { color: #e5484d; }
   .tabs { display: flex; gap: 4px; padding: 0 2px 8px; }
   .tabs button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; color: var(--muted); background: none; }
   .tabs button:hover { background: var(--surface-2); }

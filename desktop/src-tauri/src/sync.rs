@@ -174,6 +174,18 @@ pub async fn sync_sign_out(app: AppHandle) -> CmdResult<Status> {
     Ok(Status::default())
 }
 
+/// Deletes the account on the server (notes there and every device's session) and signs this
+/// laptop out. Notes on this laptop stay.
+#[tauri::command]
+pub async fn sync_delete_account(app: AppHandle) -> CmdResult<Status> {
+    let st = app.state::<SyncState>();
+    let Some(a) = st.account() else { return Ok(Status::default()) };
+    blocking(move || Client::new(SERVER).delete_account(&a.token).map_err(|e| e.to_string())).await?;
+    let _ = std::fs::remove_file(st.account_path());
+    *st.status.lock().map_err(|e| e.to_string())? = Status::default();
+    Ok(Status::default())
+}
+
 #[tauri::command]
 pub fn sync_now(st: State<SyncState>) {
     st.kick(true);
