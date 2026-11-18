@@ -25,6 +25,12 @@ public static class W {
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+  public static string ClassAt(int x, int y) { var b = new System.Text.StringBuilder(256); GetClassName(WindowFromPoint(new POINT(x, y)), b, 256); return b.ToString(); }
+  public static void Click() {
+    var d = new INPUT { type = 0 }; d.mi.flags = 0x0002; var u = new INPUT { type = 0 }; u.mi.flags = 0x0004;
+    SendInput(2, new[] { d, u }, Marshal.SizeOf(typeof(INPUT)));
+  }
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
@@ -101,6 +107,7 @@ foreach ($dx in 40, 20, 0) { [W]::MoveTo($barX - $dx, $barY); Start-Sleep -Milli
 $cur = New-Object W+POINT
 [W]::GetCursorPos([ref]$cur) | Out-Null
 Write-Host "cursor at $($cur.X),$($cur.Y), bar centre $barX,$barY, window under it $([W]::TopAt($cur.X, $cur.Y)) (ours $h)"
+Write-Host "child window under the cursor: $([W]::ClassAt($cur.X, $cur.Y))"
 Start-Sleep -Seconds 2
 $open = [W]::GetWindowRgnBox($h, [ref]$box) -eq 0
 Shot "hover"
@@ -111,6 +118,11 @@ foreach ($f in 0.8, 0.6, 0.33) { [W]::MoveTo([int]($work.Left + $work.Width * $f
 Start-Sleep -Seconds 2
 Check ([W]::GetWindowRgnBox($h, [ref]$box) -ne 0) "moving away closes it again"
 Shot "closed-again"
+
+# Click opens the panel too (a different input path than hover).
+[W]::MoveTo($barX, $barY); Start-Sleep -Milliseconds 200; [W]::Click(); Start-Sleep -Seconds 2
+Check ([W]::GetWindowRgnBox($h, [ref]$box) -eq 0) "clicking the bar opens the panel"
+Shot "clicked"
 
 Stop-Process -Id $p.Id
 Start-Sleep -Seconds 1
