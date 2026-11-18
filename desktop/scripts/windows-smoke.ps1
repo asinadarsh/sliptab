@@ -25,6 +25,19 @@ public static class W {
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx, dy; public uint data, flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; }
+  // Real mouse input, as a hand on the mouse would make it. SetCursorPos only warps the cursor,
+  // which WebView2 does not see as movement.
+  public static void MoveTo(int x, int y) {
+    var i = new INPUT { type = 0 };
+    i.mi.dx = (int)((x * 65535L) / (GetSystemMetrics(0) - 1));
+    i.mi.dy = (int)((y * 65535L) / (GetSystemMetrics(1) - 1));
+    i.mi.flags = 0x0001 | 0x8000; // MOVE | ABSOLUTE
+    SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
+  }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; public POINT(int x, int y) { X = x; Y = y; } }
   public static IntPtr Find(uint pid) {
@@ -49,8 +62,7 @@ function Shot($name) {
   $bmp.Save("$PWD\smoke-$name.png")
 }
 
-# A fresh profile each run: no notes, so the strip is the bare 120 px bar.
-$env:APPDATA = "$env:RUNNER_TEMP\edge-smoke"
+# A fresh CI machine has no notes, so the strip is the bare 120 px bar.
 $p = Start-Process -FilePath $Exe -PassThru
 Start-Sleep -Seconds 20
 Check (-not $p.HasExited) "the app is still running after 20 s"
@@ -82,16 +94,16 @@ Check ([W]::TopAt($barX - 20, $barY) -ne $h) "20 px left of the bar clicks go th
 Check ([W]::TopAt($r.L + 5, $r.T + 5) -ne $h) "the rest of the (transparent) panel area is click-through"
 
 # Hover: the panel opens on pointer enter (hover delay 0) and closes 150 ms after leaving.
-[W]::SetCursorPos($barX, $barY) | Out-Null
+[W]::MoveTo($barX - 60, $barY)
 Start-Sleep -Milliseconds 300
-[W]::SetCursorPos($barX, $barY + 1) | Out-Null   # a real move, in case the first only warped
+foreach ($dx in 40, 20, 0) { [W]::MoveTo($barX - $dx, $barY); Start-Sleep -Milliseconds 80 }  # glide onto the bar
 Start-Sleep -Seconds 2
 $open = [W]::GetWindowRgnBox($h, [ref]$box) -eq 0
 Shot "hover"
 Check $open "hovering the bar opens the panel (the region is removed)"
 Check ([W]::TopAt($r.L + 40, $r.T + 200) -eq $h) "open, the panel takes the pointer"
 
-[W]::SetCursorPos([int]($work.Left + $work.Width / 3), [int]($work.Top + $work.Height / 2)) | Out-Null
+foreach ($f in 0.8, 0.6, 0.33) { [W]::MoveTo([int]($work.Left + $work.Width * $f), [int]($work.Top + $work.Height / 2)); Start-Sleep -Milliseconds 80 }
 Start-Sleep -Seconds 2
 Check ([W]::GetWindowRgnBox($h, [ref]$box) -ne 0) "moving away closes it again"
 Shot "closed-again"
