@@ -525,6 +525,7 @@
   const log = (msg: string) => void invoke("debug_log", { msg });
 
   onMount(() => {
+    log("page ready");
     invoke<{ focusOnHover: boolean; fixedWindow: boolean; os: typeof os }>("platform").then((p) => {
       focusOnHover = p.focusOnHover;
       fixedWindow = p.fixedWindow;
@@ -648,7 +649,10 @@
   class:left={cfg.side === "left"}
   style:--accent={cfg.barColor ?? "#3b82f6"}
   style:--bar={cfg.barColor ?? "#8a8f99"}
-  onmouseenter={(e) => domPointerAt(e.clientX, e.clientY, true)}
+  onmouseenter={(e) => {
+    log(`mouseenter ${e.clientX},${e.clientY}`); // debug builds only: the Windows smoke test reads it
+    domPointerAt(e.clientX, e.clientY, true);
+  }}
   onmouseleave={() => {
     hoverTab = null;
     edge.pointerLeave();

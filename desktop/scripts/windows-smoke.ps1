@@ -24,6 +24,7 @@ public static class W {
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
@@ -97,6 +98,9 @@ Check ([W]::TopAt($r.L + 5, $r.T + 5) -ne $h) "the rest of the (transparent) pan
 [W]::MoveTo($barX - 60, $barY)
 Start-Sleep -Milliseconds 300
 foreach ($dx in 40, 20, 0) { [W]::MoveTo($barX - $dx, $barY); Start-Sleep -Milliseconds 80 }  # glide onto the bar
+$cur = New-Object W+POINT
+[W]::GetCursorPos([ref]$cur) | Out-Null
+Write-Host "cursor at $($cur.X),$($cur.Y), bar centre $barX,$barY, window under it $([W]::TopAt($cur.X, $cur.Y)) (ours $h)"
 Start-Sleep -Seconds 2
 $open = [W]::GetWindowRgnBox($h, [ref]$box) -eq 0
 Shot "hover"
