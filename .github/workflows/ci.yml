@@ -43,5 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-smoke-screenshots
-          path: smoke-*.png
+          path: |
+            smoke-*.png
+            smoke-app.log
           if-no-files-found: ignore

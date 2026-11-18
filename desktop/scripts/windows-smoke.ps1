@@ -63,7 +63,7 @@ function Shot($name) {
 }
 
 # A fresh CI machine has no notes, so the strip is the bare 120 px bar.
-$p = Start-Process -FilePath $Exe -PassThru
+$p = Start-Process -FilePath $Exe -PassThru -RedirectStandardError "$PWD\smoke-app.log"
 Start-Sleep -Seconds 20
 Check (-not $p.HasExited) "the app is still running after 20 s"
 if ($p.HasExited) { exit 1 }
@@ -109,5 +109,8 @@ Check ([W]::GetWindowRgnBox($h, [ref]$box) -ne 0) "moving away closes it again"
 Shot "closed-again"
 
 Stop-Process -Id $p.Id
+Start-Sleep -Seconds 1
+Write-Host "---- app log (debug build) ----"
+Get-Content "$PWD\smoke-app.log" -ErrorAction SilentlyContinue | Select-Object -Last 60
 if ($failures.Count) { Write-Host "$($failures.Count) check(s) failed"; exit 1 }
 Write-Host "all checks passed"
