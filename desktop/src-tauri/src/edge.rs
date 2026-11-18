@@ -87,20 +87,28 @@ pub fn place(
         let panel = edge_rect(work, scale, true, s, tabs);
         let input = (!expanded).then(|| s.show_bar.then(|| edge_rect(work, scale, false, s, tabs)));
         place_windows(window, panel, input, peek, scale)?;
-        return Ok(Some(r));
+        Ok(Some(r))
     }
-    // ponytail: macOS still resizes the window to the bar, so the preview card has no room to be
-    // clickable yet; its own edge window (macOS phase) will fix that.
-    #[cfg(not(any(target_os = "linux", windows)))]
-    let _ = peek;
+    #[cfg(not(windows))]
+    {
+        // ponytail: macOS (and Wayland without XWayland) still resize the window to the bar, so
+        // the preview card has no room to be clickable; macOS gets its own edge window later.
+        let _ = peek;
+        place_by_resizing(window, r, expanded || s.show_bar)?;
+        Ok(Some(r))
+    }
+}
+
+#[cfg(not(windows))]
+fn place_by_resizing(window: &WebviewWindow, r: Rect, visible: bool) -> tauri::Result<()> {
     window.set_size(PhysicalSize::new(r.w, r.h))?;
     window.set_position(PhysicalPosition::new(r.x, r.y))?;
-    if expanded || s.show_bar {
+    if visible {
         window.show()?;
     } else {
         window.hide()?; // hotkey-only mode
     }
-    Ok(Some(r))
+    Ok(())
 }
 
 /// X11 (incl. GNOME's XWayland): the window always stays panel-sized and transparent, and only its
