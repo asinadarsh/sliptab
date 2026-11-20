@@ -8,6 +8,12 @@
   import Cards from "$lib/views/Cards.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Sticky from "$lib/views/Sticky.svelte";
+  import Onboarding from "$lib/Onboarding.svelte";
+  import RichEditor from "$lib/RichEditor.svelte";
+  import { plain } from "$lib/format";
+  import "@fontsource-variable/figtree";
+  import "@fontsource/instrument-serif/400.css";
+  import "@fontsource/instrument-serif/400-italic.css";
 
   type Layout = "cards" | "compact" | "sticky";
   type Settings = {
@@ -20,11 +26,12 @@
     theme: "system" | "light" | "dark";
     layout: Layout;
     barColor: string | null;
+    onboarded: boolean;
   };
   type HotkeyStatus = { accelerator: string; bound: string | null; portal: boolean; error: string | null };
 
   // ---- state
-  let mode: Mode = $state("collapsed");
+  let mode: Mode = $state(new URLSearchParams(location.search).get("w") === "home" ? "expanded" : "collapsed");
   let all: Note[] = $state([]); // every visible note, for the edge tabs
   let notes: Note[] = $state([]); // what the list shows (search results while searching)
   let query = $state("");
@@ -34,6 +41,10 @@
   let folders: [string, number][] = $state([]);
   let defaultFolders: string[] = $state([]);
   let today: Note[] = $state([]); // saves to bring back today, also the bookmark tab on the edge
+  /** The right-click menu: which note or save, and where. */
+  let menu: { n: Note; x: number; y: number } | null = $state(null);
+  /** A downloaded update waiting for a restart, or one this install can't apply itself. */
+  let update: { version: string; ready: boolean; url?: string } | null = $state(null);
   let pendingSaved = false; // the edge's bookmark tab was clicked: open on Saved
   let folder: string | null = $state(null); // the chosen folder chip; null: all, "" : unsorted
   const saves = $derived(folder === null ? found : found.filter((n) => (n.link?.folder ?? "") === folder));
@@ -43,7 +54,8 @@
   let draft = $state("");
   let quick = $state("");
   let searchEl: HTMLInputElement | undefined = $state();
-  let editorEl: HTMLTextAreaElement | undefined = $state();
+  let editorEl: HTMLDivElement | undefined = $state();
+  let rich: RichEditor | undefined = $state();
   let quickEl: HTMLTextAreaElement | undefined = $state();
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let focusOnHover = false;
@@ -62,13 +74,28 @@
     theme: "system",
     layout: "cards",
     barColor: null,
+    onboarded: true, // until loaded: never flash the tour at someone who finished it
   });
+  let cfgLoaded = $state(false);
+  /** The app window (home.rs) shows the same panel as a normal window: no edge, no hover. */
+  const standalone = new URLSearchParams(location.search).get("w") === "home";
+  const openHome = () => {
+    edge.escape();
+    void invoke("open_home");
+  };
   let autostart: boolean | null = $state(null);
   let settingsMsg = $state("");
 
   // ---- sync (runs in Rust; the page shows its status and does sign-in)
-  type SyncStatus = { email: string | null; lastSyncedAt: number | null; error: string | null; received: number };
-  let sync: SyncStatus = $state({ email: null, lastSyncedAt: null, error: null, received: 0 });
+  type SyncStatus = { email: string | null; lastSyncedAt: number | null; error: string | null; received: number; beta: boolean };
+  let sync: SyncStatus = $state({ email: null, lastSyncedAt: null, error: null, received: 0, beta: false });
+  /** Saved posts are a beta feature: shown only to beta accounts (the server says which). */
+  const savesOn = $derived(sync.beta);
+  /** The server refuses this version (426): the updater runs; say so. */
+  const tooOld = $derived(!!sync.error && sync.error.includes("too old"));
+  $effect(() => {
+    if (!savesOn && tab === "saved") tab = "notes";
+  });
   let syncBusy = $state(false);
   let syncMsg = $state("");
   /** A note arrived from another device since the panel was last open: dot on the bar. */
@@ -81,7 +108,7 @@
   const sections = $derived(toSections(notes, query.trim() !== ""));
   const flat = $derived(sections.flatMap((s) => s.notes));
   const edgeItems = $derived(edgeTabs(all));
-  const tabCount = $derived(edgeItems.tabs.length + (edgeItems.more ? 1 : 0) + (today.length ? 1 : 0));
+  const tabCount = $derived(edgeItems.tabs.length + (edgeItems.more ? 1 : 0) + (today.length && savesOn ? 1 : 0));
   // Keep in step with edge.rs: BAR_HEIGHT 120, TAB_HEIGHT 36, TAB_GAP 6.
   const stripHeight = $derived(120 + tabCount * 42);
   const views = { cards: Cards, compact: Compact, sticky: Sticky };
@@ -99,7 +126,7 @@
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, reducedMotion ? 0 : ms));
   const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-  let shown = $state(false);
+  let shown = $state(new URLSearchParams(location.search).get("w") === "home");
   let seq = 0;
   let fixedWindow = false;
   let windowQueue: Promise<unknown> = Promise.resolve();
@@ -175,6 +202,7 @@
       // shows the list for a frame and then jumps to the editor.
       const target = pendingOpen;
       pendingOpen = null;
+      if (reason === "hotkey") pendingSaved = false; // the shortcut is for writing: Notes
       if (pendingSaved) {
         pendingSaved = false;
         settingsOpen = false;
@@ -182,6 +210,11 @@
         editing = null;
         tab = "saved";
         folder = null;
+        query = "";
+        void refresh();
+      } else if (!target && tab === "saved") {
+        // The bar (or the shortcut) always opens on Notes; only the bookmark tab opens on Saved.
+        tab = "notes";
         query = "";
         void refresh();
       }
@@ -279,7 +312,7 @@
   async function addQuick() {
     const body = quick.trim();
     if (!body) return;
-    if (isOnlyLink(body)) {
+    if (savesOn && isOnlyLink(body)) {
       await invoke("save_create", { text: body });
       tab = "saved";
     } else {
@@ -310,6 +343,19 @@
     await invoke("save_set_folder", { id: n.id, folder: to === "" ? null : name });
     await refresh();
     return true;
+  }
+
+  async function deleteNote(n: Note) {
+    if (!confirm(`Delete "${n.title || "Untitled"}"?`)) return;
+    await invoke("note_delete", { id: n.id });
+    if (editing?.id === n.id) editing = null;
+    await refresh();
+  }
+
+  /** Runs a menu action and closes the menu. */
+  function act(f: () => unknown) {
+    menu = null;
+    void f();
   }
 
   async function markDone(n: Note) {
@@ -352,14 +398,15 @@
 
   // ---- edge tabs: tell Rust how tall the strip is, and route pointer events by what is under them
   $effect(() => {
-    void invoke("set_tab_count", { count: tabCount }).catch(() => {});
+    if (!standalone) void invoke("set_tab_count", { count: tabCount }).catch(() => {});
   });
 
-  type EdgeTarget = { kind: "bar" } | { kind: "tab"; id: string };
+  /** `saved`: the bookmark tab, which opens like the bar but on the Saved list. */
+  type EdgeTarget = { kind: "bar"; saved: boolean } | { kind: "tab"; id: string };
   function targetAt(x: number, y: number): EdgeTarget | null {
     const el = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest<HTMLElement>("[data-edge]");
     if (!el) return null;
-    return el.dataset.edge === "tab" || el.dataset.edge === "peek" ? { kind: "tab", id: el.dataset.id! } : { kind: "bar" };
+    return el.dataset.edge === "tab" || el.dataset.edge === "peek" ? { kind: "tab", id: el.dataset.id! } : { kind: "bar", saved: el.dataset.edge === "saved" };
   }
 
   /** While collapsed only the main bar (and +N) opens on hover; a tab shows its title. */
@@ -377,6 +424,7 @@
     const t = targetAt(x, y);
     setHover(t?.kind === "tab" ? t.id : null);
     if (t?.kind === "bar") {
+      pendingSaved = t.saved; // which list the panel opens on, decided by where the pointer is
       if (entering) edge.pointerEnter();
       else edge.pointerMove();
     }
@@ -392,6 +440,7 @@
   let peekEl: HTMLElement | undefined = $state();
   $effect(() => {
     const el = peekEl;
+    if (standalone) return;
     if (!hovered || !el || mode === "expanded") {
       void invoke("set_peek", { rect: null }).catch(() => {});
       return;
@@ -507,7 +556,7 @@
       e.preventDefault();
       if (editing) void back();
       else if (settingsOpen) settingsOpen = false;
-      else edge.escape();
+      else if (!standalone) edge.escape();
       return;
     }
     if (editing || settingsOpen || tab === "saved" || document.activeElement === quickEl) return;
@@ -531,10 +580,17 @@
       fixedWindow = p.fixedWindow;
       os = p.os;
     });
-    void invoke<Settings>("get_settings").then((c) => (cfg = c));
-    void listen("edge-hotkey", () => edge.hotkey());
+    void invoke<Settings>("get_settings").then((c) => {
+      cfg = c;
+      cfgLoaded = true;
+    });
+    if (!standalone) void listen("edge-hotkey", () => edge.hotkey());
+    // An edit in the other window (edge panel or app window): reload the lists.
+    void listen("notes-changed", () => void refresh());
     void invoke<SyncStatus>("sync_status").then((st) => (sync = st));
     void listen("saves-updated", () => void refresh());
+    void listen<string>("update-ready", (e) => (update = { version: e.payload, ready: true }));
+    void listen<{ version: string; url: string }>("update-available", (e) => (update = { version: e.payload.version, ready: false, url: e.payload.url }));
     void listen<SyncStatus>("sync-status", (e) => {
       sync = e.payload;
       if (e.payload.received > 0) {
@@ -543,10 +599,30 @@
       }
     });
     void listen<HotkeyStatus>("edge-hotkey-status", (e) => (hotkey = e.payload));
+    if (standalone && new URLSearchParams(location.search).get("open") === "first") {
+      void refresh().then(() => all[0] && open(all[0])); // dev aid, see home.rs
+    }
+    // No browser menu (Back, Forward, Reload) on right-click: this is an app, not a web page.
+    // Text fields keep theirs, for cut, copy and paste.
+    document.addEventListener("contextmenu", (e) => {
+      const t = e.target as HTMLElement;
+      if (t.closest("input, textarea, [contenteditable='true']")) return; // cut, copy, paste
+      e.preventDefault();
+      const id = t.closest<HTMLElement>(".panel [data-id]")?.dataset.id;
+      const n = id && [...all, ...allSaves].find((x) => x.id === id);
+      menu = n ? { n, x: e.clientX, y: e.clientY } : null;
+    });
+    // Any click, key, scroll or leaving the window closes it.
+    const close = () => (menu = null);
+    document.addEventListener("pointerdown", (e) => !(e.target as HTMLElement).closest(".ctx") && close());
+    document.addEventListener("keydown", (e) => e.key === "Escape" && close());
+    document.addEventListener("scroll", close, true);
+    window.addEventListener("blur", close);
     window.addEventListener("error", (e) => log(`error: ${e.message}`));
     window.addEventListener("unhandledrejection", (e) => log(`rejection: ${e.reason}`));
     // WebKitGTK under XWayland drops DOM mouseleave; GTK's own crossings (with x/y) are reliable.
     void listen<{ kind: "enter" | "leave" | "move"; x: number; y: number }>("edge-pointer", (e) => {
+      if (standalone) return;
       if (e.payload.kind === "leave") {
         onNativeLeave();
       } else {
@@ -556,13 +632,13 @@
       }
     });
     document.addEventListener("mouseout", (e) => {
-      if (!e.relatedTarget) {
+      if (!e.relatedTarget && !standalone) {
         hoverTab = null;
         edge.pointerLeave();
       }
     });
     window.addEventListener("blur", () => {
-      if (edge.mode === "expanded") edge.escape();
+      if (edge.mode === "expanded" && !standalone) edge.escape();
     });
     void refresh();
   });
@@ -570,8 +646,16 @@
 
 <svelte:window onkeydown={onKey} />
 
+{#snippet closeButtons()}
+  {#if !standalone}
+    <button class="ib" onclick={openHome} aria-label="Open the Edge window" title="Open in a window"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></button>
+    <button class="ib" onclick={() => edge.escape()} aria-label="Close panel" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+  {/if}
+{/snippet}
+
 {#snippet header()}
   <header class="top">
+    {#if standalone}<h1 class="page">{tab === "saved" ? "Saved" : "Notes"}</h1>{/if}
     <div class="search">
       <span class="icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
       <input
@@ -582,12 +666,12 @@
         aria-label={tab === "saved" ? "Search saves" : "Search notes"}
       />
     </div>
-    <button class="ib" onclick={openSettings} aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
-    <button class="ib" onclick={() => edge.escape()} aria-label="Close panel" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    {#if !standalone}<button class="ib" onclick={openSettings} aria-label="Settings" title="Settings"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>{/if}
+    {@render closeButtons()}
   </header>
-  <nav class="tabs" aria-label="Notes or saved posts">
+  <nav class="tabs" class:hidden={standalone} aria-label="Notes or saved posts">
     <button class:on={tab === "notes"} onclick={() => showTab("notes")}>Notes</button>
-    <button class:on={tab === "saved"} onclick={() => showTab("saved")}>Saved{#if allSaves.length}<span>{allSaves.length}</span>{/if}</button>
+    {#if savesOn}<button class:on={tab === "saved"} onclick={() => showTab("saved")}>Saved{#if allSaves.length}<span>{allSaves.length}</span>{/if}</button>{/if}
   </nav>
 {/snippet}
 
@@ -647,18 +731,22 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <main
   class:left={cfg.side === "left"}
-  style:--accent={cfg.barColor ?? "#3b82f6"}
+  class:standalone
+  style:--accent={cfg.barColor ?? "#2f6b66"}
   style:--bar={cfg.barColor ?? "#8a8f99"}
   onmouseenter={(e) => {
+    if (standalone) return;
     log(`mouseenter ${e.clientX},${e.clientY}`); // debug builds only: the Windows smoke test reads it
     domPointerAt(e.clientX, e.clientY, true);
   }}
   onmouseleave={() => {
+    if (standalone) return;
     hoverTab = null;
     edge.pointerLeave();
   }}
-  onmousemove={(e) => domPointerAt(e.clientX, e.clientY, false)}
+  onmousemove={(e) => !standalone && domPointerAt(e.clientX, e.clientY, false)}
 >
+  {#if !standalone}
   <div
     class="strip"
     ondragstart={(e) => e.preventDefault()}
@@ -675,13 +763,13 @@
         <span>+{edgeItems.more}</span>
       </button>
     {/if}
-    {#if today.length}
-      <button class="tab saved" data-edge="tab" onclick={() => { pendingSaved = true; edge.click(); }}
+    {#if today.length && savesOn}
+      <button class="tab saved" data-edge="saved" onclick={() => { pendingSaved = true; edge.click(); }}
         aria-label="{today.length} saves to come back to" title="{today.length} saves to come back to today">
         <span>{today.length}</span>
       </button>
     {/if}
-    <button class="bar" data-edge="bar" onclick={() => edge.click()} aria-label="Open notes ({all.length}){arrived ? ', new from another device' : ''}">
+    <button class="bar" data-edge="bar" onclick={() => { pendingSaved = false; edge.click(); }} aria-label="Open notes ({all.length}){arrived ? ', new from another device' : ''}">
       {#if arrived}<i class="arrived"></i>{/if}
       {#if all.length}<span>{all.length}</span>{/if}
     </button>
@@ -702,7 +790,7 @@
     >
       <div class="peek-t">{hovered.title || "Untitled"}</div>
       <div class="peek-b">
-        {#each hovered.body.split("\n").slice(1) as line}
+        {#each plain(hovered.body).split("\n").slice(1) as line}
           {@const item = /^\s*- \[([ xX])\] (.*)$/.exec(line)}
           {#if item}<div class="ci" class:done={item[1] !== " "}>{item[1] !== " " ? "☑" : "☐"} {item[2]}</div>
           {:else if line.trim()}<div>{line}</div>
@@ -713,6 +801,56 @@
     </div>
   {/if}
 
+  {/if}
+
+  {#if standalone && cfgLoaded && !cfg.onboarded}
+    <Onboarding
+      beta={savesOn}
+      {os}
+      {sync}
+      hotkey={cfg.hotkey}
+      side={cfg.side}
+      onSignIn={signInGoogle}
+      onDone={async (startAtLogin: boolean) => {
+        await invoke("set_autostart", { enabled: startAtLogin }).then((v) => (autostart = v as boolean)).catch(() => {});
+        await saveSettings({ onboarded: true });
+      }}
+    />
+  {/if}
+
+  {#if standalone}
+    <nav class="rail" aria-label="Sections">
+      <div class="logo" aria-hidden="true"><span></span></div>
+      <button class:on={!settingsOpen && tab === "notes"} onclick={() => { settingsOpen = false; editing = null; showTab("notes"); }} aria-label="Notes" title="Notes">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8.5 13h7M8.5 16.5h5"/></svg>
+      </button>
+      {#if savesOn}
+      <button class:on={!settingsOpen && tab === "saved"} onclick={() => { settingsOpen = false; editing = null; showTab("saved"); }} aria-label="Saved" title="Saved">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 4h11v16l-5.5-4-5.5 4z"/></svg>
+      </button>
+      {/if}
+      <span class="grow"></span>
+      <button class:on={settingsOpen} onclick={openSettings} aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </nav>
+  {/if}
+
+  {#if (update || tooOld) && (standalone || shown)}
+    <div class="update" class:urgent={tooOld}>
+      <span>
+        {#if update?.ready}Edge {update.version} is installed.
+        {:else if update}Edge {update.version} is available.
+        {:else}This version of Edge can no longer sync. Updating…{/if}
+      </span>
+      {#if update?.ready}
+        <button onclick={() => invoke("restart_for_update")}>Restart</button>
+      {:else if update?.url}
+        <button onclick={() => invoke("open_link", { url: update!.url })}>Download</button>
+      {/if}
+    </div>
+  {/if}
+
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms" onpointerdown={claimFocus}>
 
@@ -720,7 +858,7 @@
       <header class="top">
         <button class="ib" onclick={() => (settingsOpen = false)} aria-label="Back to notes"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
         <h1 class="grow">Settings</h1>
-        <button class="ib" onclick={() => edge.escape()} aria-label="Close panel"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        {@render closeButtons()}
       </header>
       <div class="settings">
         <div class="group">Sync</div>
@@ -826,7 +964,7 @@
         <h1 class="grow ellipsis">{editing.title || "Untitled"}</h1>
         <button class="ib" class:pinned={editing.pinned} style:--c={editing.color ?? "var(--faint)"} onclick={() => editing && togglePin(editing)}
           aria-label={editing.pinned ? "Unpin" : "Pin to the edge"} title={editing.pinned ? "Unpin" : "Pin to the edge"}><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 3h6l-1 7 4 3v2H6v-2l4-3z"/></svg></button>
-        <button class="ib" onclick={() => edge.escape()} aria-label="Close panel"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        {@render closeButtons()}
       </header>
       {#if editing.pinned}
         <div class="swatches tabcolor" aria-label="Tab colour">
@@ -835,7 +973,16 @@
           {/each}
         </div>
       {/if}
-      <textarea class="editor" bind:this={editorEl} bind:value={draft} oninput={scheduleSave} spellcheck="true"></textarea>
+      <div class="format-bar" role="toolbar" aria-label="Formatting">
+        <button onclick={() => rich?.bold()} title="Bold (Ctrl+B)" aria-label="Bold"><b>B</b></button>
+        <button onclick={() => rich?.italic()} title="Italic (Ctrl+I)" aria-label="Italic"><i>I</i></button>
+        <button onclick={() => rich?.underline()} title="Underline (Ctrl+U)" aria-label="Underline"><u>U</u></button>
+        <button onclick={() => rich?.strike()} title="Strikethrough (Ctrl+Shift+X)" aria-label="Strikethrough"><s>S</s></button>
+        <span class="fb-hint">Links are found automatically · Ctrl+click opens</span>
+      </div>
+      <div class="editor">
+        <RichEditor bind:this={rich} bind:el={editorEl} bind:value={draft} oninput={scheduleSave} onopenlink={(href) => void invoke("open_link", { url: href })} />
+      </div>
     {:else if tab === "saved"}
       {@render header()}
       {#if allSaves.length}
@@ -875,10 +1022,90 @@
       />
     {/if}
   </div>
+
+  {#if menu}
+    {@const n = menu.n}
+    <div class="ctx" role="menu" style:left="min({menu.x}px, calc(100vw - 210px))" style:top="min({menu.y}px, calc(100vh - 190px))">
+      {#if n.link}
+        <button role="menuitem" onclick={() => act(() => openSave(n))}>Open {platformName(n.link)}</button>
+        <button role="menuitem" onclick={() => act(() => open(n))}>Edit note</button>
+        <button role="menuitem" onclick={() => act(() => markDone(n))}>{n.link.done ? "Not done" : "Mark done"}</button>
+        <button role="menuitem" onclick={() => act(() => navigator.clipboard.writeText(n.link!.url))}>Copy link</button>
+      {:else}
+        <button role="menuitem" onclick={() => act(() => open(n))}>Open</button>
+        <button role="menuitem" onclick={() => act(() => togglePin(n))}>{n.pinned ? "Unpin" : "Pin to the edge"}</button>
+        <button role="menuitem" onclick={() => act(() => navigator.clipboard.writeText(n.body))}>Copy text</button>
+      {/if}
+      <hr />
+      <button role="menuitem" class="danger" onclick={() => act(() => (n.link ? deleteSave(n) : deleteNote(n)))}>Delete</button>
+    </div>
+  {/if}
 </main>
 
 <style>
   .pill.danger { color: #e5484d; }
+  .update {
+    position: fixed;
+    z-index: 55;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 8px 8px 14px;
+    border-radius: 12px;
+    background: var(--text);
+    color: var(--bg);
+    font-size: 13px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+    white-space: nowrap;
+  }
+  .update.urgent {
+    background: #b4232a;
+    color: #fff;
+  }
+  .update button {
+    all: unset;
+    padding: 5px 12px;
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .ctx {
+    position: fixed;
+    z-index: 60;
+    min-width: 190px;
+    padding: 5px;
+    border-radius: 11px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+    display: flex;
+    flex-direction: column;
+  }
+  .ctx button {
+    all: unset;
+    padding: 7px 11px;
+    border-radius: 7px;
+    font-size: 13px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .ctx button:hover,
+  .ctx button:focus-visible {
+    background: var(--surface-2);
+  }
+  .ctx .danger {
+    color: #e5484d;
+  }
+  .ctx hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: 4px 2px;
+  }
   .tabs { display: flex; gap: 4px; padding: 0 2px 8px; }
   .tabs button { font: inherit; font-size: 12.5px; padding: 4px 10px; border-radius: 999px; color: var(--muted); background: none; }
   .tabs button:hover { background: var(--surface-2); }
@@ -909,34 +1136,37 @@
   .save:hover .move, .move:focus { opacity: 1; }
   .empty { color: var(--faint); padding: 24px 12px; text-align: center; line-height: 1.4; }
   :global(:root) {
-    --bg: #faf9f7;
-    --surface: #ffffff;
-    --surface-2: #f0eee9;
-    --text: #23252b;
-    --muted: #6f727a;
-    --faint: #a0a3aa;
-    --line: #e6e2dc;
-    --shadow: rgba(0, 0, 0, 0.07);
+    /* Warm paper tones (Wispr Flow-like): off-white, thin warm borders, ink text. */
+    --bg: #f6f4f0;
+    --surface: #fcfbf9;
+    --surface-2: #efece6;
+    --text: #1c1c1a;
+    --muted: #6b6862;
+    --faint: #a19d95;
+    --line: #e6e2da;
+    --shadow: rgba(40, 30, 10, 0.06);
+    --serif: "Instrument Serif", Georgia, serif;
+    font-family: "Figtree Variable", system-ui, sans-serif;
   }
   :global(:root[data-theme="dark"]) {
-    --bg: #16171b;
-    --surface: #1f2126;
-    --surface-2: #26292f;
-    --text: #e6e7ea;
-    --muted: #a2a6af;
-    --faint: #6c707a;
-    --line: #33363d;
+    --bg: #171614;
+    --surface: #1f1e1b;
+    --surface-2: #292725;
+    --text: #ecebe7;
+    --muted: #a7a39b;
+    --faint: #706c65;
+    --line: #34312d;
     --shadow: rgba(0, 0, 0, 0.45);
   }
   @media (prefers-color-scheme: dark) {
     :global(:root[data-theme="system"]) {
-      --bg: #16171b;
-      --surface: #1f2126;
-      --surface-2: #26292f;
-      --text: #e6e7ea;
-      --muted: #a2a6af;
-      --faint: #6c707a;
-      --line: #33363d;
+      --bg: #171614;
+      --surface: #1f1e1b;
+      --surface-2: #292725;
+      --text: #ecebe7;
+      --muted: #a7a39b;
+      --faint: #706c65;
+      --line: #34312d;
       --shadow: rgba(0, 0, 0, 0.45);
     }
   }
@@ -1127,6 +1357,89 @@
     }
   }
 
+  /* ---- the app window: an icon rail and the content on an inset paper surface */
+  main.standalone {
+    flex-direction: row;
+    background: var(--bg);
+    padding: 10px 10px 10px 0;
+    box-sizing: border-box;
+  }
+  .rail {
+    width: 64px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 0 6px;
+  }
+  .rail .logo {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    background: var(--text);
+    display: grid;
+    place-items: center;
+    margin-bottom: 22px;
+  }
+  .rail .logo span {
+    width: 4px;
+    height: 16px;
+    border-radius: 3px;
+    background: var(--bg);
+    transform: translateX(6px);
+  }
+  .rail button {
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
+    display: grid;
+    place-items: center;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .rail button:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .rail button.on {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .rail .grow {
+    flex: 1;
+  }
+  main.standalone .panel {
+    transform: none;
+    opacity: 1;
+    transition: none;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    box-shadow: 0 1px 2px var(--shadow);
+    background: var(--surface);
+    padding: 34px max(32px, calc((100% - 760px) / 2)) 18px;
+    gap: 14px;
+  }
+  main.standalone :global(.top) {
+    gap: 14px;
+    margin-bottom: 6px;
+  }
+  .page {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 auto 0 0;
+    color: var(--text);
+  }
+  main.standalone .search {
+    max-width: 280px;
+  }
+  .tabs.hidden {
+    display: none;
+  }
+
   /* ---- shared chrome */
   :global(.top) {
     display: flex;
@@ -1236,9 +1549,35 @@
     font: inherit;
     font-size: 10px;
   }
+  .format-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+  }
+  .format-bar button {
+    width: 30px;
+    height: 28px;
+    border-radius: 7px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .format-bar button:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .fb-hint {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: var(--faint);
+  }
   .editor {
     flex: 1;
-    resize: none;
+    min-height: 0;
+    overflow: auto;
     font: inherit;
     font-size: 14.5px;
     line-height: 1.6;

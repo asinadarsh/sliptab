@@ -43,6 +43,8 @@ pub struct Settings {
     pub layout: Layout,
     /// Main bar and accent colour, "#rrggbb"; None = neutral grey.
     pub bar_color: Option<String>,
+    /// The first-run tour has been finished (or skipped).
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +59,7 @@ impl Default for Settings {
             theme: Theme::System,
             layout: Layout::Cards,
             bar_color: None,
+            onboarded: false,
         }
     }
 }

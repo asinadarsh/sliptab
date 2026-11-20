@@ -1,8 +1,11 @@
 mod edge;
 mod google;
+mod home;
 mod hotkey;
 mod settings;
 mod sync;
+#[cfg(desktop)]
+mod update;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -33,7 +36,11 @@ struct EdgeState {
 }
 
 impl EdgeState {
-    fn place(&self, window: &WebviewWindow, s: &settings::Settings) -> CmdResult<()> {
+    /// Places the edge window, whichever window the command came from (settings change in the
+    /// app window too).
+    fn place(&self, from: &WebviewWindow, s: &settings::Settings) -> CmdResult<()> {
+        let Some(window) = from.app_handle().get_webview_window(EDGE) else { return Ok(()) };
+        let window = &window;
         let (expanded, tabs) = (self.expanded.load(Ordering::Relaxed), self.tabs.load(Ordering::Relaxed));
         let peek = *self.peek.lock().map_err(|e| e.to_string())?;
         edge::place(window, expanded, s, tabs, peek).map(|_| ()).map_err(|e| e.to_string())
@@ -41,6 +48,9 @@ impl EdgeState {
 }
 
 type CmdResult<T> = Result<T, String>;
+
+/// The edge window's label (declared in tauri.conf.json); the app window is `home::LABEL`.
+const EDGE: &str = "main";
 
 fn current_settings(s: &State<AppSettings>) -> CmdResult<settings::Settings> {
     s.current.lock().map(|c| c.clone()).map_err(|e| e.to_string())
@@ -149,6 +159,14 @@ fn save_open(s: State<Notes>, id: Uuid, sync: State<SyncState>) -> CmdResult<Not
     Ok(n)
 }
 
+/// Opens a link from a note in the browser. Only http(s) links, cleaned, so a note can never make
+/// the app run something else.
+#[tauri::command]
+fn open_link(url: String) -> CmdResult<()> {
+    let url = notes_core::clean_url(&url).ok_or("Not a web link")?;
+    google::open_browser(&url)
+}
+
 #[tauri::command]
 fn note_set_color(s: State<Notes>, id: Uuid, color: Option<String>, sync: State<SyncState>) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.set_color(id, color.as_deref()))?;
@@ -165,7 +183,11 @@ fn set_expanded(
     expanded: bool,
     focus: bool,
 ) -> CmdResult<()> {
+    if window.label() != EDGE {
+        return Ok(()); // only the edge window opens and closes
+    }
     if expanded {
+        let _ = tauri::Emitter::emit(&window, "edge-opened", ()); // the tour's "try it" step listens
         sync.kick(true); // fresh notes from the phone as the panel opens
     }
     state.expanded.store(expanded, Ordering::Relaxed);
@@ -222,6 +244,9 @@ fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String)
 /// Clicking a dock window does not focus it on GNOME, so the panel asks when you click in it.
 #[tauri::command]
 fn focus_panel(window: WebviewWindow) -> CmdResult<()> {
+    if window.label() != EDGE {
+        return window.set_focus().map_err(|e| e.to_string());
+    }
     edge::take_focus(&window).map_err(|e| e.to_string())
 }
 
@@ -309,10 +334,20 @@ pub fn run() {
     let builder = tauri::Builder::default().manage(hotkey::Hotkey::default()).manage(EdgeState::default());
     #[cfg(desktop)]
     let builder = builder
+        // Launching Edge again while it runs (Start menu, desktop icon, dock) opens the app window.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = home::open(app);
+        }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(hotkey::plugin())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None));
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![home::AUTOSTART_ARG]),
+        ));
     builder
         .setup(|app| {
+            notes_core::client::set_app("desktop", &app.package_info().version.to_string());
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("notes.db"), device_id(&dir)?)?;
@@ -329,6 +364,17 @@ pub fn run() {
             edge::forward_pointer_crossings(&window)?;
             if probe_settings.show_bar || edge::backend() == "x11" {
                 window.show()?; // X11 hides the bar with an empty input shape instead of unmapping
+            }
+            #[cfg(desktop)]
+            {
+                home::tray(app.handle());
+                update::start(app.handle());
+                // The first run shows the tour; a start by hand shows the window; a start at login
+                // only the edge.
+                let at_login = std::env::args().any(|a| a == home::AUTOSTART_ARG);
+                if !probe_settings.onboarded || !at_login {
+                    home::open(app.handle())?;
+                }
             }
             // Dev aid: open the panel as the hotkey would, so a screenshot can show it.
             if cfg!(debug_assertions) && std::env::var_os("EDGE_OPEN_ON_START").is_some() {
@@ -391,6 +437,7 @@ pub fn run() {
             save_set_done,
             save_create,
             save_open,
+            open_link,
             set_tab_count,
             focus_panel,
             set_peek,
@@ -407,7 +454,10 @@ pub fn run() {
             sync::sync_sign_in_google,
             sync::sync_sign_out,
             sync::sync_delete_account,
-            sync::sync_now
+            sync::sync_now,
+            home::open_home,
+            #[cfg(desktop)]
+            update::restart_for_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

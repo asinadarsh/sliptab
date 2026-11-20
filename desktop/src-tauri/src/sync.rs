@@ -15,6 +15,7 @@ use crate::{CmdResult, Notes};
 
 const SERVER: &str = "https://edge-sync.forcesync.in";
 pub const STATUS_EVENT: &str = "sync-status";
+pub const NOTES_EVENT: &str = "notes-changed";
 /// Saves got their title, thumbnail or folder: the page reloads its lists.
 pub const SAVES_EVENT: &str = "saves-updated";
 
@@ -22,6 +23,9 @@ pub const SAVES_EVENT: &str = "saves-updated";
 struct Account {
     email: String,
     token: String,
+    /// In the beta (Saved posts). Refreshed from /v1/me now and then.
+    #[serde(default)]
+    beta: bool,
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -32,17 +36,24 @@ pub struct Status {
     error: Option<String>,
     /// Notes that arrived from other devices in the last sync.
     received: usize,
+    /// The account is in the beta: show Saved posts. False when signed out.
+    beta: bool,
 }
 
 pub struct SyncState {
+    app: AppHandle,
     dir: PathBuf,
     kick: Mutex<Sender<bool>>,
     status: Mutex<Status>,
 }
 
 impl SyncState {
-    /// Ask for a sync: `now` skips the 2 s wait that lets typing settle.
+    /// Ask for a sync: `now` skips the 2 s wait that lets typing settle. A local edit (`now` false)
+    /// also tells the other window (edge panel or app window) to reload its lists.
     pub fn kick(&self, now: bool) {
+        if !now {
+            let _ = self.app.emit(NOTES_EVENT, ());
+        }
         if let Ok(k) = self.kick.lock() {
             let _ = k.send(now);
         }
@@ -59,10 +70,15 @@ impl SyncState {
 
 pub fn start(app: &AppHandle, dir: &Path) {
     let (tx, rx) = channel::<bool>();
-    let state = SyncState { dir: dir.to_owned(), kick: Mutex::new(tx), status: Mutex::new(Status::default()) };
-    state.status.lock().unwrap().email = state.account().map(|a| a.email);
+    let state = SyncState { app: app.clone(), dir: dir.to_owned(), kick: Mutex::new(tx), status: Mutex::new(Status::default()) };
+    {
+        let mut status = state.status.lock().unwrap();
+        status.email = state.account().map(|a| a.email);
+        status.beta = state.account().is_some_and(|a| a.beta);
+    }
     app.manage(state);
     app.state::<SyncState>().kick(true); // first sync right after start-up
+    listen(app.clone());
     let app = app.clone();
     std::thread::spawn(move || loop {
         match rx.recv_timeout(Duration::from_secs(60)) {
@@ -76,6 +92,28 @@ pub fn start(app: &AppHandle, dir: &Path) {
             Err(RecvTimeoutError::Disconnected) => break,
         }
         run(&app);
+    });
+}
+
+/// Holds a long poll open to the server, so a change made on another device (a pin on the phone)
+/// syncs here within about a second instead of on the next 60 s round.
+fn listen(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        let st = app.state::<SyncState>();
+        let Some(account) = st.account() else {
+            std::thread::sleep(Duration::from_secs(5)); // signed out: check again shortly
+            continue;
+        };
+        let cursor = app.state::<Notes>().0.lock().ok().and_then(|s| s.cursor().ok()).unwrap_or(0);
+        match Client::new(SERVER).wait_for_changes(&account.token, cursor) {
+            Ok(true) => {
+                st.kick(true);
+                // Let that sync move the cursor before asking again; never spins if it fails.
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Ok(false) => {}
+            Err(_) => std::thread::sleep(Duration::from_secs(15)), // offline or server down
+        }
     });
 }
 
@@ -95,15 +133,40 @@ fn run(app: &AppHandle) {
             status.error = None;
             status.received = received;
             status.last_synced_at = Some(now_ms());
+            refresh_beta(&st, &account, &mut status);
         }
         Err(ClientError::SignedOut) => {
             let _ = std::fs::remove_file(st.account_path());
             status = Status { error: Some(ClientError::SignedOut.to_string()), ..Status::default() };
         }
-        Err(e) => status.error = Some(e.to_string()),
+        Err(e) => {
+            if matches!(e, ClientError::UpdateRequired(_)) {
+                crate::update::check_soon(app); // the server refuses this version: update now
+            }
+            status.error = Some(e.to_string());
+        }
     }
     *st.status.lock().unwrap_or_else(|e| e.into_inner()) = status.clone();
     let _ = app.emit(STATUS_EVENT, status);
+}
+
+/// Re-reads the beta flag from the server at most every 10 minutes, so a newly granted beta
+/// shows up without signing in again.
+fn refresh_beta(st: &SyncState, account: &Account, status: &mut Status) {
+    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let now = now_ms();
+    if now - LAST.load(std::sync::atomic::Ordering::Relaxed) < 600_000 {
+        return;
+    }
+    LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+    let Ok(me) = Client::new(SERVER).me(&account.token) else { return };
+    status.beta = me.beta;
+    if me.beta != account.beta {
+        let updated = Account { email: account.email.clone(), token: account.token.clone(), beta: me.beta };
+        if let Ok(json) = serde_json::to_string(&updated) {
+            let _ = write_private(&st.account_path(), &json);
+        }
+    }
 }
 
 fn now_ms() -> i64 {
@@ -146,14 +209,15 @@ pub async fn sync_sign_in_google(app: AppHandle) -> CmdResult<Status> {
         let id_token = crate::google::sign_in()?;
         let client = Client::new(SERVER);
         let token = client.sign_in_google(&id_token, &device_name()).map_err(|e| e.to_string())?;
-        let email = client.me(&token).map_err(|e| e.to_string())?.email;
-        Ok((email, token))
+        let me = client.me(&token).map_err(|e| e.to_string())?;
+        Ok((me, token))
     })
     .await?;
+    let (email, beta) = (email.email, email.beta);
     let st = app.state::<SyncState>();
-    let json = serde_json::to_string(&Account { email: email.clone(), token }).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&Account { email: email.clone(), token, beta }).map_err(|e| e.to_string())?;
     write_private(&st.account_path(), &json).map_err(|e| e.to_string())?;
-    let status = Status { email: Some(email), ..Status::default() };
+    let status = Status { email: Some(email), beta, ..Status::default() };
     *st.status.lock().map_err(|e| e.to_string())? = status.clone();
     st.kick(true);
     if let Some(w) = app.get_webview_window("main") {

@@ -1,3 +1,4 @@
+import { plain } from "./format.ts";
 // Pure helpers shared by the three panel layouts. No DOM, tested with `node --test`.
 
 export type Note = {
@@ -47,7 +48,7 @@ export const platformName = (l: Link) => PLATFORMS[l.platform]?.name ?? host(l.u
 export function saveTitle(n: Note): string {
   const l = n.link!;
   if (l.title?.trim()) return l.title.trim();
-  const words = n.body.split(/\s+/).filter((w) => !/^https?:\/\//.test(w)).join(" ").trim();
+  const words = plain(n.body).split(/\s+/).filter((w) => !/^https?:\/\//.test(w)).join(" ").trim();
   if (words) return words;
   try {
     const u = new URL(l.url);
@@ -77,7 +78,7 @@ export function edgeTabs(notes: Note[]): { tabs: Note[]; more: number } {
 
 /** Body without the title line, whitespace squashed. */
 export function preview(n: Note): string {
-  const lines = n.body.split("\n");
+  const lines = plain(n.body).split("\n");
   const first = lines.findIndex((l) => l.trim() !== "");
   return lines
     .slice(first + 1)
@@ -93,7 +94,7 @@ export function checklistItems(n: Note): ChecklistItem[] {
     .split("\n")
     .map((l) => /^\s*- \[([ xX])\] (.*)$/.exec(l))
     .filter((m): m is RegExpExecArray => m !== null)
-    .map((m) => ({ text: m[2], done: m[1] !== " " }));
+    .map((m) => ({ text: plain(m[2]), done: m[1] !== " " }));
 }
 
 export function progress(n: Note): { done: number; total: number } | null {
