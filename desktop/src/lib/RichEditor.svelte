@@ -3,7 +3,7 @@
      Markers stay visible, faintly, so text and caret positions are the same as in a textarea. -->
 <script lang="ts">
   import { format, type Span } from "./format";
-  import { toggleWrap } from "./edit";
+  import { enterInItem, removeBox, toggleBox, toggleItemLine, toggleWrap } from "./edit";
 
   let {
     value = $bindable(""),
@@ -43,7 +43,16 @@
   /** One <span class="line"> per line (the newline itself stays plain text between them), so the
    *  line with the caret can show its markers while every other line hides them. */
   function html(text: string): string {
-    const out = text.split("\n").map((line) => `<span class="line">${format(line).map(span).join("")}</span>`);
+    const out = text.split("\n").map((line, i) => {
+      // A checklist item's "- [ ]" is drawn as one box (the text stays, at size 0, so offsets
+      // match). Its trailing space stays normal-size, so a caret after the box is visible.
+      // A ticked item's text is struck through.
+      const m = /^(\s*)(- \[([ xX])\] )/.exec(line);
+      if (!m) return `<span class="line">${format(line).map(span).join("")}</span>`;
+      const done = m[3] !== " ";
+      const rest = format(line.slice(m[0].length)).map(span).join("");
+      return `<span class="line item${done ? " done" : ""}">${esc(m[1])}<span class="box" data-line="${i}">${m[2].slice(0, 5)}</span><span class="txt"> ${rest}</span></span>`;
+    });
     // A trailing newline needs something after it to be drawn as an empty line.
     return out.join("\n") + (text.endsWith("\n") || text === "" ? "<br>" : "");
   }
@@ -146,6 +155,13 @@
   export function italic() { apply("*"); }
   export function underline() { apply("__"); }
   export function strike() { apply("~~"); }
+  export function checklist() {
+    const at = caret() ?? { start: value.length, end: value.length };
+    const r = toggleItemLine(value, at.start);
+    remember(value, at.start, true);
+    remember(r.text, r.caret, true);
+    changed(r.text, { start: r.caret, end: r.caret });
+  }
 
   function insertText(s: string) {
     const at = caret() ?? { start: value.length, end: value.length };
@@ -174,8 +190,25 @@
 
   function onKeydown(e: KeyboardEvent) {
     const mod = e.ctrlKey || e.metaKey;
+    if ((e.key === "Backspace" || e.key === "Delete") && !mod && !e.isComposing) {
+      const at = caret();
+      const r = at && at.start === at.end ? removeBox(value, at.start, e.key === "Backspace") : null;
+      if (r) {
+        e.preventDefault();
+        remember(r.text, r.caret, true);
+        changed(r.text, { start: r.caret, end: r.caret });
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.isComposing) {
       e.preventDefault();
+      const at = caret();
+      const r = at && at.start === at.end ? enterInItem(value, at.start) : null;
+      if (r) {
+        remember(r.text, r.caret, true);
+        changed(r.text, { start: r.caret, end: r.caret });
+        return;
+      }
       insertText("\n"); // a real newline in the text, never a <div> or <br> from the browser
       return;
     }
@@ -185,6 +218,7 @@
     else if (k === "i") (e.preventDefault(), apply("*"));
     else if (k === "u") (e.preventDefault(), apply("__"));
     else if (k === "x" && e.shiftKey) (e.preventDefault(), apply("~~"));
+    else if (k === "l" && e.shiftKey) (e.preventDefault(), checklist());
     else if (k === "z" && !e.shiftKey) (e.preventDefault(), undoStep());
     else if ((k === "z" && e.shiftKey) || k === "y") (e.preventDefault(), redoStep());
   }
@@ -192,6 +226,17 @@
   function onPaste(e: ClipboardEvent) {
     e.preventDefault();
     insertText((e.clipboardData?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n"));
+  }
+
+  // A press on a box ticks it without moving the caret there.
+  function onMousedown(e: MouseEvent) {
+    const box = (e.target as HTMLElement).closest<HTMLElement>(".box");
+    if (!box) return;
+    e.preventDefault();
+    const at = caret();
+    const text = toggleBox(value, Number(box.dataset.line));
+    remember(text, at?.start ?? 0, true);
+    changed(text, at);
   }
 
   function onClick(e: MouseEvent) {
@@ -216,6 +261,7 @@
   onkeydown={onKeydown}
   onpaste={onPaste}
   onclick={onClick}
+  onmousedown={onMousedown}
   oncompositionstart={() => (composing = true)}
   oncompositionend={() => {
     composing = false;
@@ -259,6 +305,34 @@
   .rich:focus :global(.line.cur .m) {
     font-size: inherit;
     opacity: 0.55;
+  }
+  /* Checklist: the "- [ ] " text is hidden (size 0) and a box is drawn in its place. */
+  .rich :global(.box) {
+    font-size: 0;
+    color: transparent;
+    cursor: pointer;
+    user-select: none;
+  }
+  .rich :global(.box)::before {
+    content: "";
+    display: inline-block;
+    width: 15px;
+    height: 15px;
+    margin: 0 4px 0 1px;
+    vertical-align: -2px;
+    border: 1.5px solid var(--faint);
+    border-radius: 4px;
+    box-sizing: border-box;
+  }
+  .rich :global(.item.done .box)::before {
+    background: var(--accent)
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 8.2l2.6 2.6L12 5.4' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+      center / 13px no-repeat;
+    border-color: var(--accent);
+  }
+  .rich :global(.item.done .txt) {
+    text-decoration: line-through;
+    color: var(--muted);
   }
   .rich :global(.lnk) {
     color: var(--accent);

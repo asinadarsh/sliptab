@@ -43,6 +43,18 @@
   let today: Note[] = $state([]); // saves to bring back today, also the bookmark tab on the edge
   /** The right-click menu: which note or save, and where. */
   let menu: { n: Note; x: number; y: number } | null = $state(null);
+  // The app's own confirm / prompt: window.confirm and prompt show nothing in the Linux webview
+  // (they return false / null at once), which made Delete do nothing.
+  let asking: { text: string; ok: string; input: string | null; done: (v: string | null) => void } | null = $state(null);
+  function ask(text: string, ok: string, input: string | null = null): Promise<string | null> {
+    log(`ask: ${text}`);
+    return new Promise((done) => (asking = { text, ok, input, done }));
+  }
+  function answer(v: string | null) {
+    log(`answer: ${JSON.stringify(v)} (asking ${asking ? "set" : "null"})`);
+    asking?.done(v);
+    asking = null;
+  }
   /** A downloaded update waiting for a restart, or one this install can't apply itself. */
   let update: { version: string; ready: boolean; url?: string } | null = $state(null);
   let pendingSaved = false; // the edge's bookmark tab was clicked: open on Saved
@@ -322,6 +334,14 @@
     await refresh();
   }
 
+  /** The quick box's text (or nothing) as a new note, opened in the full editor. */
+  async function openFull() {
+    const n = await invoke<Note>("note_create", { body: quick });
+    quick = "";
+    await refresh();
+    await open(n);
+  }
+
   function showTab(t: typeof tab) {
     tab = t;
     void refresh();
@@ -338,7 +358,7 @@
 
   /** Moves a save; "" is Unsorted, "\u0001new" asks for a name. False if the user cancelled. */
   async function moveSave(n: Note, to: string): Promise<boolean> {
-    const name = to === "\u0001new" ? prompt("New folder name")?.trim().slice(0, 40) : to;
+    const name = to === "\u0001new" ? (await ask("New folder name", "Create", ""))?.trim().slice(0, 40) : to;
     if (!name && to !== "") return false;
     await invoke("save_set_folder", { id: n.id, folder: to === "" ? null : name });
     await refresh();
@@ -346,16 +366,19 @@
   }
 
   async function deleteNote(n: Note) {
-    if (!confirm(`Delete "${n.title || "Untitled"}"?`)) return;
+    if ((await ask(`Delete "${n.title || "Untitled"}"?`, "Delete")) === null) return;
+    log(`deleting ${n.id}`);
     await invoke("note_delete", { id: n.id });
     if (editing?.id === n.id) editing = null;
     await refresh();
   }
 
-  /** Runs a menu action and closes the menu. */
+  /** Runs a menu action and closes the menu. A failure is logged, not dropped silently. */
   function act(f: () => unknown) {
     menu = null;
-    void f();
+    void Promise.resolve()
+      .then(f)
+      .catch((e) => log(`menu action: ${e}`));
   }
 
   async function markDone(n: Note) {
@@ -385,6 +408,8 @@
 
   async function back() {
     await flushSave();
+    // A note left empty (opened with the full editor, nothing typed) is not kept as "Untitled".
+    if (editing && !draft.trim()) await invoke("note_delete", { id: editing.id });
     editing = null;
     await refresh();
     await tick();
@@ -493,8 +518,8 @@
   // Opens the browser at Google; resolves when the user is back and signed in.
   const signInGoogle = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_in_google")));
   const signOutSync = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_out")));
-  const deleteAccount = () => {
-    if (!confirm(`Delete the Sliptab account ${sync.email}? Everything synced to it is deleted from the server and every device is signed out. Notes on this laptop stay.`)) return;
+  const deleteAccount = async () => {
+    if ((await ask(`Delete the Sliptab account ${sync.email}? Everything synced to it is deleted from the server and every device is signed out. Notes on this laptop stay.`, "Delete account")) === null) return;
     void syncStep(async () => void (sync = await invoke<SyncStatus>("sync_delete_account")));
   };
 
@@ -723,7 +748,7 @@
       aria-label="New note"
     ></textarea>
     {#if variant !== "slim"}
-      <div class="hint"><span><kbd>↵</kbd> save <kbd>⇧↵</kbd> new line</span><span>- [ ] for a checklist</span></div>
+      <div class="hint"><span><kbd>↵</kbd> save <kbd>⇧↵</kbd> new line</span><button class="full" onclick={openFull} title="Open in the full editor: formatting and checklists">Full editor ↗</button></div>
     {/if}
   </div>
 {/snippet}
@@ -978,7 +1003,8 @@
         <button onclick={() => rich?.italic()} title="Italic (Ctrl+I)" aria-label="Italic"><i>I</i></button>
         <button onclick={() => rich?.underline()} title="Underline (Ctrl+U)" aria-label="Underline"><u>U</u></button>
         <button onclick={() => rich?.strike()} title="Strikethrough (Ctrl+Shift+X)" aria-label="Strikethrough"><s>S</s></button>
-        <span class="fb-hint">Links are found automatically · Ctrl+click opens</span>
+        <button onclick={() => rich?.checklist()} title="Checklist (Ctrl+Shift+L)" aria-label="Checklist"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12.5l2.8 2.8L16 9.5"/></svg></button>
+        <span class="fb-hint">Select text, then B / I / U / S · Ctrl+click opens links</span>
       </div>
       <div class="editor">
         <RichEditor bind:this={rich} bind:el={editorEl} bind:value={draft} oninput={scheduleSave} onopenlink={(href) => void invoke("open_link", { url: href })} />
@@ -1022,6 +1048,24 @@
       />
     {/if}
   </div>
+
+  {#if asking}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="ask-back" onclick={() => answer(null)}>
+      <div class="ask" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+        <p>{asking.text}</p>
+        {#if asking.input !== null}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input autofocus bind:value={asking.input} onkeydown={(e) => e.key === "Enter" && answer(asking!.input)} />
+        {/if}
+        <div class="row">
+          <button onclick={() => answer(null)}>Cancel</button>
+          <!-- svelte-ignore a11y_autofocus -->
+          <button class="go" class:danger={asking.ok.startsWith("Delete")} autofocus={asking.input === null} onclick={() => answer(asking!.input ?? "")}>{asking.ok}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if menu}
     {@const n = menu.n}
@@ -1073,6 +1117,60 @@
     color: var(--text);
     font-weight: 600;
     cursor: pointer;
+  }
+  .ask-back {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgba(0, 0, 0, 0.35);
+    display: grid;
+    place-items: center;
+    padding: 16px;
+  }
+  .ask {
+    width: min(320px, 100%);
+    padding: 16px;
+    border-radius: 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
+    font-size: 13.5px;
+    color: var(--text);
+  }
+  .ask p {
+    margin: 0 0 12px;
+    line-height: 1.45;
+  }
+  .ask input {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 12px;
+    padding: 7px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .ask .row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .ask button {
+    all: unset;
+    cursor: pointer;
+    padding: 6px 12px;
+    border-radius: 8px;
+    background: var(--surface-2);
+  }
+  .ask .go {
+    background: var(--text);
+    color: var(--bg);
+  }
+  .ask .go.danger {
+    background: #e5484d;
+    color: #fff;
   }
   .ctx {
     position: fixed;
@@ -1412,6 +1510,7 @@
     flex: 1;
   }
   main.standalone .panel {
+    min-width: 0; /* a flex item's default min-width is its content: a long line widened it past the window */
     transform: none;
     opacity: 1;
     transition: none;
@@ -1537,6 +1636,16 @@
     font-size: 11px;
     margin-top: 4px;
     gap: 8px;
+  }
+  .hint .full {
+    all: unset;
+    cursor: pointer;
+    color: var(--muted);
+    padding: 0 2px;
+    border-radius: 4px;
+  }
+  .hint .full:hover {
+    color: var(--text);
   }
   .capture.tile .hint span:last-child {
     display: none;
