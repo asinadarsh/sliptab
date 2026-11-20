@@ -25,7 +25,10 @@ pub struct Preview {
 
 impl Preview {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.author.is_none() && self.text.is_none() && self.thumbnail.is_none()
+        self.title.is_none()
+            && self.author.is_none()
+            && self.text.is_none()
+            && self.thumbnail.is_none()
     }
 }
 
@@ -35,9 +38,16 @@ const MAX_TEXT: usize = 1500;
 /// Reads a page's preview tags. `final_url` is where any redirects ended.
 pub fn parse_html(platform: &str, final_url: &str, html: &str) -> Preview {
     let tags = meta_tags(html);
-    let get = |k: &str| tags.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_owned);
+    let get = |k: &str| {
+        tags.get(k)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
     let page_title = title_tag(html);
-    let thumbnail = get("og:image").or_else(|| get("twitter:image")).filter(|u| u.starts_with("https://"));
+    let thumbnail = get("og:image")
+        .or_else(|| get("twitter:image"))
+        .filter(|u| u.starts_with("https://"));
     // rel=canonical first: Instagram's og:url adds the username (/user/reel/id), while its
     // canonical is the /reel/id form that shares use, so a repeated share still matches.
     let canonical = canonical_link(html)
@@ -47,14 +57,24 @@ pub fn parse_html(platform: &str, final_url: &str, html: &str) -> Preview {
     let mut p = match platform {
         "x" | "threads" => {
             let text = get("og:description").or_else(|| get("description"));
-            let author = get("og:title").and_then(|t| handle_in(&t)).or_else(|| get("twitter:creator"));
-            Preview { title: text.as_deref().map(first_line), text, author, ..Preview::default() }
+            let author = get("og:title")
+                .and_then(|t| handle_in(&t))
+                .or_else(|| get("twitter:creator"));
+            Preview {
+                title: text.as_deref().map(first_line),
+                text,
+                author,
+                ..Preview::default()
+            }
         }
         "instagram" => {
             // og:title: `Saakshi Gondaliya on Instagram: "#chess #chessplayer"` (the caption, cut).
             // description: `<likes> - handle on <date>: "<caption>"` or `<caption> - @handle on <date>`.
             let caption = get("og:title")
-                .and_then(|t| t.split_once(" on Instagram: ").map(|(_, c)| c.trim().trim_matches('"').to_owned()))
+                .and_then(|t| {
+                    t.split_once(" on Instagram: ")
+                        .map(|(_, c)| c.trim().trim_matches('"').to_owned())
+                })
                 .filter(|c| !c.is_empty())
                 .or_else(|| get("description").and_then(|d| instagram_caption(&d)));
             let tt = get("twitter:title"); // "Hanjla Ali (@info.byhanzla) • Instagram reel"
@@ -62,15 +82,32 @@ pub fn parse_html(platform: &str, final_url: &str, html: &str) -> Preview {
             // No caption: name the post after its kind and author, so the card isn't a bare link.
             let fallback = tt.as_deref().and_then(|t| {
                 let (who, kind) = t.split_once(" • ")?;
-                Some(format!("{kind} by {}", who.split(" (@").next().unwrap_or(who).trim()))
+                Some(format!(
+                    "{kind} by {}",
+                    who.split(" (@").next().unwrap_or(who).trim()
+                ))
             });
-            Preview { title: caption.as_deref().map(first_line).or(fallback), text: caption, author, ..Preview::default() }
+            Preview {
+                title: caption.as_deref().map(first_line).or(fallback),
+                text: caption,
+                author,
+                ..Preview::default()
+            }
         }
         _ => {
-            let title = get("og:title").or_else(|| get("twitter:title")).or(page_title);
+            let title = get("og:title")
+                .or_else(|| get("twitter:title"))
+                .or(page_title);
             let text = get("og:description").or_else(|| get("description"));
-            let author = get("og:site_name").or_else(|| get("author")).filter(|a| !a.starts_with("http"));
-            Preview { title, text, author, ..Preview::default() }
+            let author = get("og:site_name")
+                .or_else(|| get("author"))
+                .filter(|a| !a.starts_with("http"));
+            Preview {
+                title,
+                text,
+                author,
+                ..Preview::default()
+            }
         }
     };
     p.thumbnail = thumbnail;
@@ -86,7 +123,12 @@ pub fn parse_html(platform: &str, final_url: &str, html: &str) -> Preview {
 /// Reads YouTube's oEmbed answer.
 pub fn parse_youtube_oembed(json: &str) -> Preview {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
-    let s = |k: &str| v[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let s = |k: &str| {
+        v[k].as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
     Preview {
         title: s("title").map(|t| cap(&t, MAX_TITLE)),
         author: s("author_name"),
@@ -107,13 +149,20 @@ fn handle_in(s: &str) -> Option<String> {
 /// `caption - @handle on <date>` → caption.
 fn instagram_caption(d: &str) -> Option<String> {
     if let Some(i) = d.find(": \"") {
-        return Some(d[i + 3..].trim_end_matches(['"', '.', ' ']).to_owned()).filter(|c| !c.is_empty());
+        return Some(d[i + 3..].trim_end_matches(['"', '.', ' ']).to_owned())
+            .filter(|c| !c.is_empty());
     }
-    d.rsplit_once(" - @").map(|(c, _)| c.trim().to_owned()).filter(|c| !c.is_empty())
+    d.rsplit_once(" - @")
+        .map(|(c, _)| c.trim().to_owned())
+        .filter(|c| !c.is_empty())
 }
 
 fn first_line(s: &str) -> String {
-    let line = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     cap(line, 100)
 }
 
@@ -134,13 +183,19 @@ fn meta_tags(html: &str) -> HashMap<String, String> {
     let mut at = 0;
     while let Some(i) = lower[at..].find("<meta") {
         let start = at + i;
-        let Some(len) = html[start..].find('>') else { break };
+        let Some(len) = html[start..].find('>') else {
+            break;
+        };
         let tag = &html[start..start + len];
         at = start + len;
         let attrs = attributes(tag);
-        let key = attrs.get("property").or_else(|| attrs.get("name")).or_else(|| attrs.get("itemprop"));
+        let key = attrs
+            .get("property")
+            .or_else(|| attrs.get("name"))
+            .or_else(|| attrs.get("itemprop"));
         if let (Some(k), Some(v)) = (key, attrs.get("content")) {
-            out.entry(k.to_ascii_lowercase()).or_insert_with(|| unescape(v));
+            out.entry(k.to_ascii_lowercase())
+                .or_insert_with(|| unescape(v));
         }
     }
     out
@@ -154,7 +209,10 @@ fn canonical_link(html: &str) -> Option<String> {
         let len = html[start..].find('>')?;
         let attrs = attributes(&html[start..start + len]);
         at = start + len;
-        if attrs.get("rel").is_some_and(|r| r.eq_ignore_ascii_case("canonical")) {
+        if attrs
+            .get("rel")
+            .is_some_and(|r| r.eq_ignore_ascii_case("canonical"))
+        {
             return attrs.get("href").map(|h| unescape(h));
         }
     }
@@ -201,7 +259,9 @@ fn attributes(tag: &str) -> HashMap<String, String> {
         i += 1;
         let value = match b.get(i) {
             Some(&q @ (b'"' | b'\'')) => {
-                let end = tag[i + 1..].find(q as char).map_or(tag.len(), |e| i + 1 + e);
+                let end = tag[i + 1..]
+                    .find(q as char)
+                    .map_or(tag.len(), |e| i + 1 + e);
                 let v = &tag[i + 1..end];
                 i = end + 1;
                 v
@@ -239,7 +299,11 @@ fn unescape(s: &str) -> String {
             "quot" => Some('"'),
             "apos" => Some('\''),
             "nbsp" => Some(' '),
-            _ if name.starts_with("#x") || name.starts_with("#X") => u32::from_str_radix(&name[2..], 16).ok().and_then(char::from_u32),
+            _ if name.starts_with("#x") || name.starts_with("#X") => {
+                u32::from_str_radix(&name[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
             _ if name.starts_with('#') => name[1..].parse().ok().and_then(char::from_u32),
             _ => None,
         };
@@ -263,16 +327,33 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> String {
-        std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
     }
 
     #[test]
     fn instagram_reel_gives_caption_handle_and_image() {
-        let p = parse_html("instagram", "https://www.instagram.com/reel/DftSYUwtKNT/", &fixture("instagram_reel.html"));
-        assert_eq!(p.title.as_deref(), Some("#chess #chessplayer #explore #reels #fyp"));
+        let p = parse_html(
+            "instagram",
+            "https://www.instagram.com/reel/DftSYUwtKNT/",
+            &fixture("instagram_reel.html"),
+        );
+        assert_eq!(
+            p.title.as_deref(),
+            Some("#chess #chessplayer #explore #reels #fyp")
+        );
         assert_eq!(p.author.as_deref(), Some("@saakshi.chess"));
-        assert!(p.thumbnail.unwrap().starts_with("https://scontent.cdninstagram.com/"));
-        assert_eq!(p.canonical.as_deref(), Some("https://www.instagram.com/reel/DftSYUwtKNT/"));
+        assert!(p
+            .thumbnail
+            .unwrap()
+            .starts_with("https://scontent.cdninstagram.com/"));
+        assert_eq!(
+            p.canonical.as_deref(),
+            Some("https://www.instagram.com/reel/DftSYUwtKNT/")
+        );
     }
 
     #[test]
@@ -290,12 +371,23 @@ mod tests {
 <meta name="description" content="8,197 likes, 14 comments - info.byhanzla on November 13, 2026" />
 <meta property="og:title" content="Hanjla Ali on Instagram" />"#;
         let p = parse_html("instagram", "", html);
-        assert_eq!((p.title.as_deref(), p.text, p.author.as_deref()), (Some("Instagram reel by Hanjla Ali"), None, Some("@info.byhanzla")));
+        assert_eq!(
+            (p.title.as_deref(), p.text, p.author.as_deref()),
+            (
+                Some("Instagram reel by Hanjla Ali"),
+                None,
+                Some("@info.byhanzla")
+            )
+        );
     }
 
     #[test]
     fn a_deleted_instagram_post_gives_nothing() {
-        let p = parse_html("instagram", "https://www.instagram.com/p/BdA94kVgQhU/", &fixture("instagram_gone.html"));
+        let p = parse_html(
+            "instagram",
+            "https://www.instagram.com/p/BdA94kVgQhU/",
+            &fixture("instagram_gone.html"),
+        );
         assert!(p.is_empty());
         assert_eq!(p.canonical, None);
     }
@@ -304,33 +396,64 @@ mod tests {
     fn x_post_gives_the_whole_text_and_handle() {
         let p = parse_html("x", "", &fixture("x_post.html"));
         assert_eq!(p.title.as_deref(), Some("Can I ask a dumb question?"));
-        assert!(p.text.unwrap().contains("why are we sacrificing our best years trying to get rich?"));
+        assert!(p
+            .text
+            .unwrap()
+            .contains("why are we sacrificing our best years trying to get rich?"));
         assert_eq!(p.author.as_deref(), Some("@b4dgerr"));
-        assert_eq!(p.canonical.as_deref(), Some("https://x.com/b4dgerr/status/2121498943662023026"));
+        assert_eq!(
+            p.canonical.as_deref(),
+            Some("https://x.com/b4dgerr/status/2121498943662023026")
+        );
     }
 
     #[test]
     fn threads_short_link_resolves_to_the_post() {
-        let p = parse_html("threads", "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv?xmt=1", &fixture("threads_share.html"));
-        assert_eq!(p.title.as_deref(), Some("Meta just open sourced the design system behind over 13K of its apps."));
+        let p = parse_html(
+            "threads",
+            "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv?xmt=1",
+            &fixture("threads_share.html"),
+        );
+        assert_eq!(
+            p.title.as_deref(),
+            Some("Meta just open sourced the design system behind over 13K of its apps.")
+        );
         assert_eq!(p.author.as_deref(), Some("@nick_saraev"));
-        assert_eq!(p.canonical.as_deref(), Some("https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv"));
+        assert_eq!(
+            p.canonical.as_deref(),
+            Some("https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv")
+        );
     }
 
     #[test]
     fn an_article_gives_title_description_and_image() {
         let p = parse_html("web", "", &fixture("web_article.html"));
-        assert_eq!(p.title.as_deref(), Some("Top 10 Pocket Alternatives in 2026"));
-        assert!(p.text.unwrap().starts_with("Discover the best Pocket alternatives"));
-        assert!(p.thumbnail.unwrap().starts_with("https://storage.ghost.io/"));
+        assert_eq!(
+            p.title.as_deref(),
+            Some("Top 10 Pocket Alternatives in 2026")
+        );
+        assert!(p
+            .text
+            .unwrap()
+            .starts_with("Discover the best Pocket alternatives"));
+        assert!(p
+            .thumbnail
+            .unwrap()
+            .starts_with("https://storage.ghost.io/"));
     }
 
     #[test]
     fn youtube_oembed() {
         let p = parse_youtube_oembed(&fixture("youtube_oembed.json"));
-        assert_eq!(p.title.as_deref(), Some("Finally Karma Caught Up to Abhi & Niyu? 😨"));
+        assert_eq!(
+            p.title.as_deref(),
+            Some("Finally Karma Caught Up to Abhi & Niyu? 😨")
+        );
         assert_eq!(p.author.as_deref(), Some("Rameshth Neekhra"));
-        assert_eq!(p.thumbnail.as_deref(), Some("https://i.ytimg.com/vi/gE6EZSLnFtI/hqdefault.jpg"));
+        assert_eq!(
+            p.thumbnail.as_deref(),
+            Some("https://i.ytimg.com/vi/gE6EZSLnFtI/hqdefault.jpg")
+        );
         assert!(parse_youtube_oembed("Not Found").is_empty());
     }
 

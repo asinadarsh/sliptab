@@ -20,7 +20,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     for n in notes {
-        println!("{}{}  v{}  {}", if n.pinned { "📌 " } else { "" }, n.id, n.version, n.title);
+        println!(
+            "{}{}  v{}  {}",
+            if n.pinned { "📌 " } else { "" },
+            n.id,
+            n.version,
+            n.title
+        );
     }
     Ok(())
 }

@@ -48,7 +48,9 @@ async fn check(app: &AppHandle) {
 
 async fn install(app: &AppHandle) -> Result<(), String> {
     let updater = app.updater().map_err(|e| e.to_string())?;
-    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else { return Ok(()) };
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
     let version = update.version.clone();
     match update.download_and_install(|_, _| {}, || {}).await {
         Ok(()) => {
@@ -58,7 +60,10 @@ async fn install(app: &AppHandle) -> Result<(), String> {
         }
         Err(e) => {
             // Can't replace this install in place (Linux .deb): point at the download instead.
-            let _ = app.emit(AVAILABLE_EVENT, serde_json::json!({ "version": version, "url": DOWNLOADS }));
+            let _ = app.emit(
+                AVAILABLE_EVENT,
+                serde_json::json!({ "version": version, "url": DOWNLOADS }),
+            );
             Err(e.to_string())
         }
     }

@@ -58,7 +58,7 @@ def release(version: str, dist: pathlib.Path) -> None:
         sys.exit("nothing to publish")
     manifest = {
         "version": version,
-        "notes": f"Edge {version}",
+        "notes": f"Sliptab {version}",
         "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "platforms": platforms,
     }

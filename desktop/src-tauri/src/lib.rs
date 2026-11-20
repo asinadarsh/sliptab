@@ -39,11 +39,18 @@ impl EdgeState {
     /// Places the edge window, whichever window the command came from (settings change in the
     /// app window too).
     fn place(&self, from: &WebviewWindow, s: &settings::Settings) -> CmdResult<()> {
-        let Some(window) = from.app_handle().get_webview_window(EDGE) else { return Ok(()) };
+        let Some(window) = from.app_handle().get_webview_window(EDGE) else {
+            return Ok(());
+        };
         let window = &window;
-        let (expanded, tabs) = (self.expanded.load(Ordering::Relaxed), self.tabs.load(Ordering::Relaxed));
+        let (expanded, tabs) = (
+            self.expanded.load(Ordering::Relaxed),
+            self.tabs.load(Ordering::Relaxed),
+        );
         let peek = *self.peek.lock().map_err(|e| e.to_string())?;
-        edge::place(window, expanded, s, tabs, peek).map(|_| ()).map_err(|e| e.to_string())
+        edge::place(window, expanded, s, tabs, peek)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -53,10 +60,16 @@ type CmdResult<T> = Result<T, String>;
 const EDGE: &str = "main";
 
 fn current_settings(s: &State<AppSettings>) -> CmdResult<settings::Settings> {
-    s.current.lock().map(|c| c.clone()).map_err(|e| e.to_string())
+    s.current
+        .lock()
+        .map(|c| c.clone())
+        .map_err(|e| e.to_string())
 }
 
-fn with_store<T, E: std::fmt::Display>(s: &State<Notes>, f: impl FnOnce(&mut Store) -> Result<T, E>) -> CmdResult<T> {
+fn with_store<T, E: std::fmt::Display>(
+    s: &State<Notes>,
+    f: impl FnOnce(&mut Store) -> Result<T, E>,
+) -> CmdResult<T> {
     let mut store = s.0.lock().map_err(|e| e.to_string())?;
     f(&mut store).map_err(|e| e.to_string())
 }
@@ -86,7 +99,12 @@ fn note_update(s: State<Notes>, id: Uuid, body: String, sync: State<SyncState>) 
 }
 
 #[tauri::command]
-fn note_set_pinned(s: State<Notes>, id: Uuid, pinned: bool, sync: State<SyncState>) -> CmdResult<Note> {
+fn note_set_pinned(
+    s: State<Notes>,
+    id: Uuid,
+    pinned: bool,
+    sync: State<SyncState>,
+) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.set_pinned(id, pinned))?;
     sync.kick(false);
     Ok(n)
@@ -128,11 +146,19 @@ type FolderCounts = Vec<(String, i64)>;
 /// The folders holding saves (with counts) and the default list, for the folder chips and menu.
 #[tauri::command]
 fn save_folders(s: State<Notes>) -> CmdResult<(FolderCounts, Vec<&'static str>)> {
-    Ok((with_store(&s, |st| st.save_folders())?, notes_core::folders::FOLDERS.to_vec()))
+    Ok((
+        with_store(&s, |st| st.save_folders())?,
+        notes_core::folders::FOLDERS.to_vec(),
+    ))
 }
 
 #[tauri::command]
-fn save_set_folder(s: State<Notes>, id: Uuid, folder: Option<String>, sync: State<SyncState>) -> CmdResult<Note> {
+fn save_set_folder(
+    s: State<Notes>,
+    id: Uuid,
+    folder: Option<String>,
+    sync: State<SyncState>,
+) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.set_save_folder(id, folder.as_deref()))?;
     sync.kick(false);
     Ok(n)
@@ -154,7 +180,12 @@ fn save_set_done(s: State<Notes>, id: Uuid, done: bool, sync: State<SyncState>) 
 #[tauri::command]
 fn save_open(s: State<Notes>, id: Uuid, sync: State<SyncState>) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.mark_opened(id))?;
-    google::open_browser(&n.link.as_ref().expect("mark_opened only succeeds for saves").url)?;
+    google::open_browser(
+        &n.link
+            .as_ref()
+            .expect("mark_opened only succeeds for saves")
+            .url,
+    )?;
     sync.kick(false);
     Ok(n)
 }
@@ -168,7 +199,12 @@ fn open_link(url: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-fn note_set_color(s: State<Notes>, id: Uuid, color: Option<String>, sync: State<SyncState>) -> CmdResult<Note> {
+fn note_set_color(
+    s: State<Notes>,
+    id: Uuid,
+    color: Option<String>,
+    sync: State<SyncState>,
+) -> CmdResult<Note> {
     let n = with_store(&s, |st| st.set_color(id, color.as_deref()))?;
     sync.kick(false);
     Ok(n)
@@ -221,7 +257,13 @@ fn platform() -> Platform {
     Platform {
         focus_on_hover: false,
         fixed_window: x11,
-        os: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
+        os: if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(windows) {
+            "windows"
+        } else {
+            "linux"
+        },
     }
 }
 
@@ -232,12 +274,17 @@ fn get_hotkey(app: tauri::AppHandle) -> hotkey::Status {
 
 /// Bind a new hotkey and save it. On failure the old hotkey stays bound and saved.
 #[tauri::command]
-fn set_hotkey(app: tauri::AppHandle, s: State<AppSettings>, accelerator: String) -> CmdResult<hotkey::Status> {
+fn set_hotkey(
+    app: tauri::AppHandle,
+    s: State<AppSettings>,
+    accelerator: String,
+) -> CmdResult<hotkey::Status> {
     let previous = s.current.lock().map_err(|e| e.to_string())?.hotkey.clone();
     let status = hotkey::apply(&app, &accelerator, Some(&previous))?;
     let mut current = s.current.lock().map_err(|e| e.to_string())?;
     current.hotkey = accelerator;
-    settings::save(&s.dir, &current).map_err(|e| format!("Hotkey set, but saving settings failed: {e}"))?;
+    settings::save(&s.dir, &current)
+        .map_err(|e| format!("Hotkey set, but saving settings failed: {e}"))?;
     Ok(status)
 }
 
@@ -252,8 +299,17 @@ fn focus_panel(window: WebviewWindow) -> CmdResult<()> {
 
 /// The page reports how many tabs it draws, so the window/input area matches the strip.
 #[tauri::command]
-fn set_tab_count(window: WebviewWindow, s: State<AppSettings>, state: State<EdgeState>, count: usize) -> CmdResult<()> {
-    if state.tabs.swap(count.min(edge::MAX_TABS), Ordering::Relaxed) != count.min(edge::MAX_TABS) {
+fn set_tab_count(
+    window: WebviewWindow,
+    s: State<AppSettings>,
+    state: State<EdgeState>,
+    count: usize,
+) -> CmdResult<()> {
+    if state
+        .tabs
+        .swap(count.min(edge::MAX_TABS), Ordering::Relaxed)
+        != count.min(edge::MAX_TABS)
+    {
         state.place(&window, &current_settings(&s)?)?;
     }
     Ok(())
@@ -261,7 +317,12 @@ fn set_tab_count(window: WebviewWindow, s: State<AppSettings>, state: State<Edge
 
 /// The hovered tab's preview card (None when hidden), so it can take clicks while collapsed.
 #[tauri::command]
-fn set_peek(window: WebviewWindow, s: State<AppSettings>, state: State<EdgeState>, rect: Option<edge::Local>) -> CmdResult<()> {
+fn set_peek(
+    window: WebviewWindow,
+    s: State<AppSettings>,
+    state: State<EdgeState>,
+    rect: Option<edge::Local>,
+) -> CmdResult<()> {
     let mut peek = state.peek.lock().map_err(|e| e.to_string())?;
     if *peek == rect {
         return Ok(());
@@ -286,7 +347,11 @@ fn save_settings(
 ) -> CmdResult<settings::Settings> {
     let saved = {
         let mut current = s.current.lock().map_err(|e| e.to_string())?;
-        *current = settings::Settings { hotkey: current.hotkey.clone(), ..new }.sanitized();
+        *current = settings::Settings {
+            hotkey: current.hotkey.clone(),
+            ..new
+        }
+        .sanitized();
         settings::save(&s.dir, &current).map_err(|e| e.to_string())?;
         current.clone()
     };
@@ -331,7 +396,9 @@ fn device_id(dir: &Path) -> std::io::Result<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default().manage(hotkey::Hotkey::default()).manage(EdgeState::default());
+    let builder = tauri::Builder::default()
+        .manage(hotkey::Hotkey::default())
+        .manage(EdgeState::default());
     #[cfg(desktop)]
     let builder = builder
         // Launching Edge again while it runs (Start menu, desktop icon, dock) opens the app window.
@@ -346,6 +413,11 @@ pub fn run() {
             Some(vec![home::AUTOSTART_ARG]),
         ));
     builder
+        .on_window_event(|w, e| {
+            if let tauri::WindowEvent::ThemeChanged(_) = e {
+                home::refresh_tray(w.app_handle());
+            }
+        })
         .setup(|app| {
             notes_core::client::set_app("desktop", &app.package_info().version.to_string());
             let dir = app.path().app_data_dir()?;

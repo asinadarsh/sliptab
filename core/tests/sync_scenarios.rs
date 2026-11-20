@@ -28,9 +28,18 @@ impl Server {
                 self.notes.insert(n.id, (n, self.seq));
             }
         }
-        let mut notes: Vec<_> = self.notes.values().filter(|(_, s)| *s > req.cursor).cloned().collect();
+        let mut notes: Vec<_> = self
+            .notes
+            .values()
+            .filter(|(_, s)| *s > req.cursor)
+            .cloned()
+            .collect();
         notes.sort_by_key(|(_, s)| *s);
-        SyncResponse { cursor: self.seq, notes: notes.into_iter().map(|(n, _)| n).collect(), more: false }
+        SyncResponse {
+            cursor: self.seq,
+            notes: notes.into_iter().map(|(n, _)| n).collect(),
+            more: false,
+        }
     }
 }
 
@@ -51,13 +60,22 @@ fn settle(a: &mut Store, b: &mut Store, server: &mut Server) {
 }
 
 fn view(s: &Store) -> Vec<(String, bool, Option<Uuid>)> {
-    let mut v: Vec<_> = s.list().unwrap().into_iter().map(|n| (n.body, n.pinned, n.conflict_of)).collect();
+    let mut v: Vec<_> = s
+        .list()
+        .unwrap()
+        .into_iter()
+        .map(|n| (n.body, n.pinned, n.conflict_of))
+        .collect();
     v.sort();
     v
 }
 
 fn devices() -> (Store, Store, Server) {
-    (Store::open_in_memory("phone").unwrap(), Store::open_in_memory("laptop").unwrap(), Server::default())
+    (
+        Store::open_in_memory("phone").unwrap(),
+        Store::open_in_memory("laptop").unwrap(),
+        Server::default(),
+    )
 }
 
 #[test]
@@ -82,7 +100,10 @@ fn offline_edits_of_the_same_text_keep_both() {
     let main = notes.iter().find(|x| x.id == n.id).unwrap();
     let copy = notes.iter().find(|x| x.id != n.id).unwrap();
     assert_eq!(main.body, "oat milk");
-    assert_eq!((copy.body.as_str(), copy.conflict_of), ("milk and eggs", Some(n.id)));
+    assert_eq!(
+        (copy.body.as_str(), copy.conflict_of),
+        ("milk and eggs", Some(n.id))
+    );
 }
 
 #[test]
@@ -94,7 +115,10 @@ fn pin_on_laptop_and_edit_on_phone_merge_without_a_copy() {
     std::thread::sleep(std::time::Duration::from_millis(2)); // the text edit is the later one
     phone.update_body(n.id, "milk and eggs").unwrap();
     settle(&mut phone, &mut laptop, &mut server);
-    assert_eq!(view(&phone), vec![("milk and eggs".to_string(), true, None)]);
+    assert_eq!(
+        view(&phone),
+        vec![("milk and eggs".to_string(), true, None)]
+    );
 }
 
 #[test]
@@ -105,7 +129,10 @@ fn an_edit_on_one_device_beats_a_delete_on_the_other() {
     phone.delete(n.id).unwrap();
     laptop.update_body(n.id, "milk and eggs").unwrap();
     settle(&mut phone, &mut laptop, &mut server);
-    assert_eq!(view(&phone), vec![("milk and eggs".to_string(), false, None)]);
+    assert_eq!(
+        view(&phone),
+        vec![("milk and eggs".to_string(), false, None)]
+    );
 }
 
 #[test]
@@ -128,7 +155,10 @@ fn a_retried_request_does_not_duplicate_notes() {
     let resp = server.sync(&req); // the phone retries
     phone.apply_sync(&req, &resp).unwrap();
     settle(&mut phone, &mut laptop, &mut server);
-    assert_eq!(view(&laptop), vec![("milk and eggs".to_string(), false, None)]);
+    assert_eq!(
+        view(&laptop),
+        vec![("milk and eggs".to_string(), false, None)]
+    );
 }
 
 #[test]
@@ -141,7 +171,10 @@ fn typing_during_a_sync_is_not_lost() {
     phone.apply_sync(&req, &resp).unwrap();
     assert_eq!(phone.get(n.id).unwrap().unwrap().body, "milk and eggs");
     settle(&mut phone, &mut laptop, &mut server);
-    assert_eq!(view(&laptop), vec![("milk and eggs".to_string(), false, None)]);
+    assert_eq!(
+        view(&laptop),
+        vec![("milk and eggs".to_string(), false, None)]
+    );
 }
 
 #[test]
@@ -156,16 +189,24 @@ fn notes_made_offline_on_both_devices_all_arrive() {
 #[test]
 fn a_save_from_the_phone_reaches_the_laptop_with_its_folder() {
     let (mut phone, mut laptop, mut server) = devices();
-    let (s, new) = phone.create_save("https://www.instagram.com/reel/DftSYUwtKNT/?vrfl=abc").unwrap();
+    let (s, new) = phone
+        .create_save("https://www.instagram.com/reel/DftSYUwtKNT/?vrfl=abc")
+        .unwrap();
     assert!(new);
     phone.set_save_folder(s.id, Some("Learn")).unwrap();
     settle(&mut phone, &mut laptop, &mut server);
     let got = laptop.saves().unwrap();
     assert_eq!(got.len(), 1);
     let link = got[0].link.clone().unwrap();
-    assert_eq!((link.url.as_str(), link.platform.as_str()), ("https://www.instagram.com/reel/DftSYUwtKNT", "instagram"));
+    assert_eq!(
+        (link.url.as_str(), link.platform.as_str()),
+        ("https://www.instagram.com/reel/DftSYUwtKNT", "instagram")
+    );
     assert_eq!(link.folder.as_deref(), Some("Learn"));
-    assert!(laptop.list().unwrap().is_empty(), "a save is not listed among notes");
+    assert!(
+        laptop.list().unwrap().is_empty(),
+        "a save is not listed among notes"
+    );
 }
 
 #[test]
@@ -179,21 +220,31 @@ fn folder_on_one_device_and_done_after_sync_on_the_other_both_survive() {
     laptop.mark_opened(s.id).unwrap();
     settle(&mut phone, &mut laptop, &mut server);
     let l = phone.get(s.id).unwrap().unwrap().link.unwrap();
-    assert_eq!((l.folder.as_deref(), l.done, l.opened_at.is_some()), (Some("Ideas"), true, true));
+    assert_eq!(
+        (l.folder.as_deref(), l.done, l.opened_at.is_some()),
+        (Some("Ideas"), true, true)
+    );
 }
 
 #[test]
 fn a_folder_change_and_a_text_edit_offline_merge_without_a_copy() {
     let (mut phone, mut laptop, mut server) = devices();
-    let (s, _) = phone.create_save("look https://youtu.be/hdMszZ2ah5Q").unwrap();
+    let (s, _) = phone
+        .create_save("look https://youtu.be/hdMszZ2ah5Q")
+        .unwrap();
     settle(&mut phone, &mut laptop, &mut server);
     phone.set_save_folder(s.id, Some("Watch Later")).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
-    laptop.update_body(s.id, "look https://youtu.be/hdMszZ2ah5Q  for the talk").unwrap();
+    laptop
+        .update_body(s.id, "look https://youtu.be/hdMszZ2ah5Q  for the talk")
+        .unwrap();
     settle(&mut phone, &mut laptop, &mut server);
     let saves = phone.saves().unwrap();
     assert_eq!(saves.len(), 1, "no conflict copy");
-    assert_eq!(saves[0].link.as_ref().unwrap().folder.as_deref(), Some("Watch Later"));
+    assert_eq!(
+        saves[0].link.as_ref().unwrap().folder.as_deref(),
+        Some("Watch Later")
+    );
     assert!(saves[0].body.ends_with("for the talk"));
 }
 
@@ -211,13 +262,27 @@ fn fields_from_a_newer_version_survive_an_older_device_editing_the_note() {
                   "canonical": "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv" }
     }))
     .unwrap();
-    server.sync(&SyncRequest { cursor: 0, changes: vec![notes_core::sync::Change { note: newer.clone(), base: None }] });
+    server.sync(&SyncRequest {
+        cursor: 0,
+        changes: vec![notes_core::sync::Change {
+            note: newer.clone(),
+            base: None,
+        }],
+    });
     sync(&mut phone, &mut server);
-    phone.update_body(newer.id, "https://www.threads.com/share/_oANR7c7l  read later").unwrap();
+    phone
+        .update_body(
+            newer.id,
+            "https://www.threads.com/share/_oANR7c7l  read later",
+        )
+        .unwrap();
     sync(&mut phone, &mut server);
     let stored = serde_json::to_value(&server.notes[&newer.id].0).unwrap();
     assert_eq!(stored["reminder_at"], 1794700000000_i64);
-    assert_eq!(stored["link"]["canonical"], "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv");
+    assert_eq!(
+        stored["link"]["canonical"],
+        "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv"
+    );
     assert!(stored["body"].as_str().unwrap().ends_with("read later"));
 }
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Edge",
+  "productName": "Sliptab",
   "version": "0.2.0",
   "identifier": "com.asinadarsh.edge",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Edge",
+        "title": "Sliptab",
         "width": 8,
         "height": 120,
         "decorations": false,

@@ -39,13 +39,20 @@ pub fn edge_rect(work: Rect, scale: f64, expanded: bool, s: &Settings, tabs: usi
         let want = s.panel_width.map_or(work.w / 3, |w| (w * scale) as u32);
         (want.clamp(min, max), work.h)
     } else {
-        ((BAR_WIDTH * scale).round() as u32, ((strip_height(tabs) * scale).round() as u32).min(work.h))
+        (
+            (BAR_WIDTH * scale).round() as u32,
+            ((strip_height(tabs) * scale).round() as u32).min(work.h),
+        )
     };
     let x = match s.side {
         Side::Left => work.x,
         Side::Right => work.x + (work.w - w) as i32,
     };
-    let y = if expanded { work.y } else { work.y + ((work.h - h) as f64 * s.bar_position).round() as i32 };
+    let y = if expanded {
+        work.y
+    } else {
+        work.y + ((work.h - h) as f64 * s.bar_position).round() as i32
+    };
     Rect { x, y, w, h }
 }
 
@@ -70,7 +77,12 @@ pub fn place(
         return Ok(None);
     };
     let wa = monitor.work_area();
-    let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width, h: wa.size.height };
+    let work = Rect {
+        x: wa.position.x,
+        y: wa.position.y,
+        w: wa.size.width,
+        h: wa.size.height,
+    };
     let scale = monitor.scale_factor();
     let r = edge_rect(work, scale, expanded, s, tabs);
     #[cfg(target_os = "linux")]
@@ -118,7 +130,12 @@ fn place_by_resizing(window: &WebviewWindow, r: Rect, visible: bool) -> tauri::R
 #[cfg(target_os = "linux")]
 /// `input`: None = expanded, the whole window takes input; Some(None) = collapsed with no bar;
 /// Some(Some(bar)) = collapsed, only the bar takes input.
-fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, peek: Option<Local>) -> tauri::Result<bool> {
+fn place_x11(
+    window: &WebviewWindow,
+    panel: Rect,
+    input: Option<Option<Rect>>,
+    peek: Option<Local>,
+) -> tauri::Result<bool> {
     use gtk::cairo::{RectangleInt, Region};
     use gtk::prelude::*;
     let gtk_window = window.gtk_window()?;
@@ -128,7 +145,9 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, p
         gtk_window.set_type_hint(gtk::gdk::WindowTypeHint::Dock);
         gtk_window.realize(); // create the X11 window now, before it is first shown
     }
-    let Some(gdk_window) = gtk_window.window() else { return Ok(false) };
+    let Some(gdk_window) = gtk_window.window() else {
+        return Ok(false);
+    };
     if !gdk_window.display().type_().name().contains("X11") {
         return Ok(false);
     }
@@ -157,9 +176,15 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, p
             let bw = (b.w as i32 / s).max(1);
             let bh = b.h as i32 / s;
             let bx = if b.x == panel.x { 0 } else { w - bw };
-            let region = Region::create_rectangle(&RectangleInt::new(bx, (b.y - panel.y) / s, bw, bh));
+            let region =
+                Region::create_rectangle(&RectangleInt::new(bx, (b.y - panel.y) / s, bw, bh));
             if let Some(p) = peek {
-                let r = RectangleInt::new(p.x.floor() as i32, p.y.floor() as i32, p.w.ceil() as i32, p.h.ceil() as i32);
+                let r = RectangleInt::new(
+                    p.x.floor() as i32,
+                    p.y.floor() as i32,
+                    p.w.ceil() as i32,
+                    p.h.ceil() as i32,
+                );
                 let _ = region.union_rectangle(&r);
             }
             region
@@ -176,9 +201,19 @@ fn place_x11(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, p
 /// stays out of Alt+Tab and the taskbar.
 /// `input`: None = expanded; Some(None) = collapsed, bar hidden; Some(Some(bar)) = collapsed.
 #[cfg(windows)]
-fn place_windows(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>>, peek: Option<Local>, scale: f64) -> tauri::Result<()> {
-    use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW};
+fn place_windows(
+    window: &WebviewWindow,
+    panel: Rect,
+    input: Option<Option<Rect>>,
+    peek: Option<Local>,
+    scale: f64,
+) -> tauri::Result<()> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
     // A resizable borderless window gets Tauri's invisible drag-to-resize strip along its edges
     // (a child window, TAURI_DRAG_RESIZE_BORDERS). Our bar sits on that edge, so the strip took
     // every hover and click. The panel is not user-resizable, and set_size still works.
@@ -207,7 +242,11 @@ fn place_windows(window: &WebviewWindow, panel: Rect, input: Option<Option<Rect>
             None => std::ptr::null_mut(), // the whole window
             Some(None) => CreateRectRgn(0, 0, 0, 0),
             Some(Some(b)) => {
-                let bx = if b.x == panel.x { 0 } else { panel.w as i32 - b.w as i32 };
+                let bx = if b.x == panel.x {
+                    0
+                } else {
+                    panel.w as i32 - b.w as i32
+                };
                 let by = b.y - panel.y;
                 let r = CreateRectRgn(bx, by, bx + b.w as i32, by + b.h as i32);
                 if let Some(p) = peek {
@@ -256,7 +295,9 @@ pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
     use std::{cell::Cell, rc::Rc};
 
     let gtk_window = window.gtk_window()?;
-    gtk_window.add_events(gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK);
+    gtk_window.add_events(
+        gtk::gdk::EventMask::ENTER_NOTIFY_MASK | gtk::gdk::EventMask::LEAVE_NOTIFY_MASK,
+    );
     // While the pointer is inside, poll its position: WebKitGTK under XWayland delivers few DOM
     // mousemove events, so moving from one tab to the next inside the strip went unnoticed.
     // Inside our own X11 window the position is accurate (it only goes stale over Wayland windows).
@@ -270,7 +311,10 @@ pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
             // open, close and open again.
             if e.detail() != NotifyType::Inferior && e.mode() == CrossingMode::Normal {
                 let (x, y) = e.position();
-                let _ = w.emit("edge-pointer", serde_json::json!({ "kind": kind, "x": x, "y": y }));
+                let _ = w.emit(
+                    "edge-pointer",
+                    serde_json::json!({ "kind": kind, "x": x, "y": y }),
+                );
                 if leave {
                     inside.set(false);
                 } else if !inside.replace(true) {
@@ -289,11 +333,23 @@ pub fn forward_pointer_crossings(window: &WebviewWindow) -> tauri::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn start_polling(win: &gtk::ApplicationWindow, w: WebviewWindow, inside: std::rc::Rc<std::cell::Cell<bool>>) {
+fn start_polling(
+    win: &gtk::ApplicationWindow,
+    w: WebviewWindow,
+    inside: std::rc::Rc<std::cell::Cell<bool>>,
+) {
     use gtk::prelude::*;
     use tauri::Emitter;
-    let Some(gdk_window) = win.window() else { return };
-    let Some(pointer) = gdk_window.display().default_seat().and_then(|seat| seat.pointer()) else { return };
+    let Some(gdk_window) = win.window() else {
+        return;
+    };
+    let Some(pointer) = gdk_window
+        .display()
+        .default_seat()
+        .and_then(|seat| seat.pointer())
+    else {
+        return;
+    };
     let mut last = (f64::NAN, f64::NAN);
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
         if !inside.get() {
@@ -302,7 +358,10 @@ fn start_polling(win: &gtk::ApplicationWindow, w: WebviewWindow, inside: std::rc
         let (_, x, y, _) = gdk_window.device_position_double(&pointer);
         if (x, y) != last {
             last = (x, y);
-            let _ = w.emit("edge-pointer", serde_json::json!({ "kind": "move", "x": x, "y": y }));
+            let _ = w.emit(
+                "edge-pointer",
+                serde_json::json!({ "kind": "move", "x": x, "y": y }),
+            );
         }
         gtk::glib::ControlFlow::Continue
     });
@@ -321,14 +380,24 @@ pub fn forward_pointer_crossings(_window: &WebviewWindow) -> tauri::Result<()> {
 pub fn release_focus(window: &WebviewWindow) -> tauri::Result<bool> {
     use gtk::prelude::*;
     let gtk_window = window.gtk_window()?;
-    let Some(gdk_window) = gtk_window.window() else { return Ok(false) };
-    let Ok(display) = gdk_window.display().downcast::<gdkx11::X11Display>() else { return Ok(false) };
+    let Some(gdk_window) = gtk_window.window() else {
+        return Ok(false);
+    };
+    let Ok(display) = gdk_window.display().downcast::<gdkx11::X11Display>() else {
+        return Ok(false);
+    };
     // SAFETY: the Display pointer belongs to GDK and stays valid for the life of the app;
     // XSetInputFocus and XFlush only send requests on it, on the GTK main thread.
     unsafe {
         use gtk::glib::translate::ToGlibPtr;
-        let xd = gdk_x11_sys::gdk_x11_display_get_xdisplay(display.to_glib_none().0) as *mut x11::xlib::Display;
-        x11::xlib::XSetInputFocus(xd, x11::xlib::PointerRoot as u64, x11::xlib::RevertToPointerRoot, x11::xlib::CurrentTime);
+        let xd = gdk_x11_sys::gdk_x11_display_get_xdisplay(display.to_glib_none().0)
+            as *mut x11::xlib::Display;
+        x11::xlib::XSetInputFocus(
+            xd,
+            x11::xlib::PointerRoot as u64,
+            x11::xlib::RevertToPointerRoot,
+            x11::xlib::CurrentTime,
+        );
         x11::xlib::XFlush(xd);
     }
     Ok(true)
@@ -339,7 +408,8 @@ pub fn release_focus(window: &WebviewWindow) -> tauri::Result<bool> {
 #[cfg(windows)]
 pub fn release_focus(_window: &WebviewWindow) -> tauri::Result<bool> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
-    let prev = PREVIOUS_FOREGROUND.swap(0, std::sync::atomic::Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+    let prev = PREVIOUS_FOREGROUND.swap(0, std::sync::atomic::Ordering::Relaxed)
+        as windows_sys::Win32::Foundation::HWND;
     // SAFETY: IsWindow checks the handle is still a live window before it is used; we are the
     // foreground process, which Windows requires for SetForegroundWindow to succeed.
     Ok(!prev.is_null() && unsafe { IsWindow(prev) != 0 && SetForegroundWindow(prev) != 0 })
@@ -357,7 +427,9 @@ pub fn backend() -> &'static str {
         "windows"
     } else if cfg!(target_os = "macos") {
         "macos"
-    } else if std::env::var("GDK_BACKEND").as_deref() == Ok("x11") || std::env::var_os("WAYLAND_DISPLAY").is_none() {
+    } else if std::env::var("GDK_BACKEND").as_deref() == Ok("x11")
+        || std::env::var_os("WAYLAND_DISPLAY").is_none()
+    {
         "x11"
     } else {
         "wayland"
@@ -366,10 +438,12 @@ pub fn backend() -> &'static str {
 
 /// Run before GTK starts. Override with EDGE_NATIVE_WAYLAND=1 to test native Wayland.
 pub fn prefer_xwayland_on_gnome() {
-    let gnome = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_uppercase().contains("GNOME"));
+    let gnome =
+        std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_uppercase().contains("GNOME"));
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
     let xwayland = std::env::var_os("DISPLAY").is_some();
-    let overridden = std::env::var_os("EDGE_NATIVE_WAYLAND").is_some() || std::env::var_os("GDK_BACKEND").is_some();
+    let overridden = std::env::var_os("EDGE_NATIVE_WAYLAND").is_some()
+        || std::env::var_os("GDK_BACKEND").is_some();
     if gnome && wayland && xwayland && !overridden {
         std::env::set_var("GDK_BACKEND", "x11");
     }
@@ -380,7 +454,12 @@ mod tests {
     use super::*;
 
     // 1920x1080 screen, GNOME top bar 32px tall.
-    const WORK: Rect = Rect { x: 0, y: 32, w: 1920, h: 1048 };
+    const WORK: Rect = Rect {
+        x: 0,
+        y: 32,
+        w: 1920,
+        h: 1048,
+    };
 
     fn edge_rect(work: Rect, scale: f64, expanded: bool) -> Rect {
         super::edge_rect(work, scale, expanded, &Settings::default(), 0)
@@ -393,59 +472,128 @@ mod tests {
         assert_eq!(r.y, 32 + (1048 - r.h as i32) / 2);
         let capped = super::edge_rect(WORK, 1.0, false, &Settings::default(), 50);
         assert_eq!(capped.h, 120 + super::MAX_TABS as u32 * 42);
-        let tiny = Rect { x: 0, y: 0, w: 800, h: 200 };
-        assert_eq!(super::edge_rect(tiny, 1.0, false, &Settings::default(), 7).h, 200);
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 200,
+        };
+        assert_eq!(
+            super::edge_rect(tiny, 1.0, false, &Settings::default(), 7).h,
+            200
+        );
     }
 
     #[test]
     fn left_side_and_bar_position() {
-        let s = Settings { side: Side::Left, bar_position: 0.0, ..Default::default() };
-        assert_eq!(super::edge_rect(WORK, 1.0, false, &s, 0), Rect { x: 0, y: 32, w: 8, h: 120 });
+        let s = Settings {
+            side: Side::Left,
+            bar_position: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::edge_rect(WORK, 1.0, false, &s, 0),
+            Rect {
+                x: 0,
+                y: 32,
+                w: 8,
+                h: 120
+            }
+        );
         assert_eq!(super::edge_rect(WORK, 1.0, true, &s, 0).x, 0);
-        let bottom = Settings { bar_position: 1.0, ..Default::default() };
+        let bottom = Settings {
+            bar_position: 1.0,
+            ..Default::default()
+        };
         let r = super::edge_rect(WORK, 1.0, false, &bottom, 0);
         assert_eq!(r.y + r.h as i32, 32 + 1048);
     }
 
     #[test]
     fn dragged_panel_width_is_clamped() {
-        let w = |pw: f64| super::edge_rect(WORK, 1.0, true, &Settings { panel_width: Some(pw), ..Default::default() }, 0).w;
+        let w = |pw: f64| {
+            super::edge_rect(
+                WORK,
+                1.0,
+                true,
+                &Settings {
+                    panel_width: Some(pw),
+                    ..Default::default()
+                },
+                0,
+            )
+            .w
+        };
         assert_eq!(w(500.0), 500);
         assert_eq!(w(50.0), 320);
         assert_eq!(w(5000.0), 1536);
-        let hidpi = Settings { panel_width: Some(500.0), ..Default::default() };
+        let hidpi = Settings {
+            panel_width: Some(500.0),
+            ..Default::default()
+        };
         assert_eq!(super::edge_rect(WORK, 2.0, true, &hidpi, 0).w, 1000);
     }
 
     #[test]
     fn collapsed_bar_hugs_right_edge_vertically_centred() {
         let r = edge_rect(WORK, 1.0, false);
-        assert_eq!(r, Rect { x: 1912, y: 32 + (1048 - 120) / 2, w: 8, h: 120 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 1912,
+                y: 32 + (1048 - 120) / 2,
+                w: 8,
+                h: 120
+            }
+        );
     }
 
     #[test]
     fn expanded_panel_is_a_third_and_full_height() {
         let r = edge_rect(WORK, 1.0, true);
-        assert_eq!(r, Rect { x: 1280, y: 32, w: 640, h: 1048 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 1280,
+                y: 32,
+                w: 640,
+                h: 1048
+            }
+        );
     }
 
     #[test]
     fn panel_has_a_minimum_width_scaled_for_hidpi() {
-        let small = Rect { x: 0, y: 0, w: 1200, h: 800 };
+        let small = Rect {
+            x: 0,
+            y: 0,
+            w: 1200,
+            h: 800,
+        };
         assert_eq!(edge_rect(small, 2.0, true).w, 640);
         assert_eq!(edge_rect(small, 2.0, false).w, 16);
     }
 
     #[test]
     fn second_monitor_offset_is_respected() {
-        let right_monitor = Rect { x: 1920, y: 0, w: 2560, h: 1440 };
+        let right_monitor = Rect {
+            x: 1920,
+            y: 0,
+            w: 2560,
+            h: 1440,
+        };
         let r = edge_rect(right_monitor, 1.0, false);
         assert_eq!(r.x, 1920 + 2560 - 8);
     }
 
     #[test]
     fn never_wider_than_a_tiny_screen() {
-        let tiny = Rect { x: 0, y: 0, w: 300, h: 100 };
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            w: 300,
+            h: 100,
+        };
         let r = edge_rect(tiny, 1.0, true);
         assert_eq!((r.x, r.w), (0, 300));
         assert_eq!(edge_rect(tiny, 1.0, false).h, 100);

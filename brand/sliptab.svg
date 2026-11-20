@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 34">
+  <!-- Same proportions as the app's .rail .logo: 34px box, 10px corners, a 4x16 line 6px right of centre. -->
+  <rect width="34" height="34" rx="10" fill="#1d1b19"/>
+  <rect x="21" y="9" width="4" height="16" rx="2" fill="#f4efe6"/>
+</svg>

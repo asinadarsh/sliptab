@@ -6,12 +6,13 @@ use uuid::Uuid;
 
 use crate::folders::suggest_folder;
 use crate::link::{clean_url, Link};
-use crate::preview::Preview;
 use crate::note::{derive_title, valid_color, Note};
+use crate::preview::Preview;
 use crate::sync::{body_hash, merge, meta_hash, Base, Change, SyncRequest, SyncResponse};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE notes (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL,
@@ -33,27 +34,35 @@ CREATE TABLE sync_queue (
     note_id   TEXT PRIMARY KEY,
     queued_at INTEGER NOT NULL
 );
-"#, r#"
+"#,
+    r#"
 ALTER TABLE notes ADD COLUMN color TEXT;
-"#, r#"
+"#,
+    r#"
 -- The server state this device last saw for each note (NULL: never synced), for merging.
 ALTER TABLE notes ADD COLUMN synced_version INTEGER;
 ALTER TABLE notes ADD COLUMN synced_hash INTEGER;
 CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-"#, r#"
+"#,
+    r#"
 ALTER TABLE notes ADD COLUMN synced_meta INTEGER;
-"#, r#"
+"#,
+    r#"
 -- Saved posts: JSON of `Link`, NULL for an ordinary note.
 ALTER TABLE notes ADD COLUMN link TEXT;
-"#, r#"
+"#,
+    r#"
 -- Fields from newer versions of Edge, as a JSON object, kept so this version never strips them.
 ALTER TABLE notes ADD COLUMN extra TEXT;
-"#, r#"
+"#,
+    r#"
 -- Failed details fetches for saves, this device only (not synced): when to try again.
 CREATE TABLE fetch_attempts (note_id TEXT PRIMARY KEY, tries INTEGER NOT NULL, next_at INTEGER NOT NULL);
-"#];
+"#,
+];
 
-const NOTE_COLUMNS: &str = "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
+const NOTE_COLUMNS: &str =
+    "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
                             device_id, version, conflict_of, color, link, extra";
 
 /// The local, offline-first note store. Every write lands here before any sync happens.
@@ -131,7 +140,10 @@ impl Store {
 
     /// Moves a save to a folder (None: unsorted). No-op error if the note is not a save.
     pub fn set_save_folder(&mut self, id: Uuid, folder: Option<&str>) -> rusqlite::Result<Note> {
-        let folder = folder.map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned);
+        let folder = folder
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .map(str::to_owned);
         self.edit_link(id, |l| l.folder = folder)
     }
 
@@ -150,14 +162,24 @@ impl Store {
     /// never opened leads its day; the rest are the least looked-at saves, oldest first, with no
     /// save repeated in the plan until all have had a turn. Done saves and saves less than a day
     /// old are left out.
-    pub fn digest_plan(&self, today_start: i64, days: usize, per_day: usize) -> rusqlite::Result<Vec<Vec<Note>>> {
+    pub fn digest_plan(
+        &self,
+        today_start: i64,
+        days: usize,
+        per_day: usize,
+    ) -> rusqlite::Result<Vec<Vec<Note>>> {
         const DAY: i64 = 86_400_000;
         let mut pool: Vec<Note> = self
             .saves()?
             .into_iter()
             .filter(|n| n.link.as_ref().is_some_and(|l| !l.done))
             .collect();
-        pool.sort_by_key(|n| (n.link.as_ref().and_then(|l| l.opened_at).unwrap_or(0), n.created_at));
+        pool.sort_by_key(|n| {
+            (
+                n.link.as_ref().and_then(|l| l.opened_at).unwrap_or(0),
+                n.created_at,
+            )
+        });
         let mut used = std::collections::HashSet::new();
         let mut plan = Vec::with_capacity(days);
         for d in 0..days as i64 {
@@ -165,7 +187,8 @@ impl Store {
             let ready: Vec<&Note> = pool.iter().filter(|n| n.created_at < start - DAY).collect();
             let mut day: Vec<Note> = Vec::new();
             if let Some(n) = ready.iter().find(|n| {
-                n.created_at >= start - 7 * DAY && n.created_at < start - 6 * DAY // saved on this weekday last week && n.link.as_ref().is_some_and(|l| l.opened_at.is_none())
+                n.created_at >= start - 7 * DAY && n.created_at < start - 6 * DAY
+                // saved on this weekday last week && n.link.as_ref().is_some_and(|l| l.opened_at.is_none())
             }) {
                 used.insert(n.id);
                 day.push((*n).clone());
@@ -232,7 +255,10 @@ impl Store {
     pub fn set_save_details(&mut self, id: Uuid, p: &Preview) -> rusqlite::Result<Note> {
         let now = now_ms();
         let note = self.get(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
-        let link = note.link.clone().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let link = note
+            .link
+            .clone()
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let canonical = p
             .canonical
             .as_deref()
@@ -249,14 +275,26 @@ impl Store {
             if let Some(c) = canonical {
                 l.url = c;
             }
-            (l.title, l.author, l.text, l.thumbnail) = (p.title.clone(), p.author.clone(), p.text.clone(), p.thumbnail.clone());
+            (l.title, l.author, l.text, l.thumbnail) = (
+                p.title.clone(),
+                p.author.clone(),
+                p.text.clone(),
+                p.thumbnail.clone(),
+            );
             l.fetched_at = Some(now);
             if l.folder.is_none() {
                 let words = [l.title.as_deref(), l.text.as_deref(), Some(body.as_str())];
-                l.folder = suggest_folder(&l.platform, &words.into_iter().flatten().collect::<Vec<_>>()).map(str::to_owned);
+                l.folder = suggest_folder(
+                    &l.platform,
+                    &words.into_iter().flatten().collect::<Vec<_>>(),
+                )
+                .map(str::to_owned);
             }
         })?;
-        self.conn.execute("DELETE FROM fetch_attempts WHERE note_id = ?1", [id.to_string()])?;
+        self.conn.execute(
+            "DELETE FROM fetch_attempts WHERE note_id = ?1",
+            [id.to_string()],
+        )?;
         Ok(updated)
     }
 
@@ -266,7 +304,11 @@ impl Store {
         const WAIT_MS: [i64; 5] = [60_000, 600_000, 3_600_000, 21_600_000, 86_400_000];
         let tries: i64 = self
             .conn
-            .query_row("SELECT tries FROM fetch_attempts WHERE note_id = ?1", [id.to_string()], |r| r.get(0))
+            .query_row(
+                "SELECT tries FROM fetch_attempts WHERE note_id = ?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
             .optional()?
             .unwrap_or(0);
         if tries as usize >= WAIT_MS.len() {
@@ -276,7 +318,11 @@ impl Store {
         self.conn.execute(
             "INSERT INTO fetch_attempts (note_id, tries, next_at) VALUES (?1, ?2, ?3) \
              ON CONFLICT(note_id) DO UPDATE SET tries = excluded.tries, next_at = excluded.next_at",
-            params![id.to_string(), tries + 1, now_ms() + WAIT_MS[tries as usize]],
+            params![
+                id.to_string(),
+                tries + 1,
+                now_ms() + WAIT_MS[tries as usize]
+            ],
         )?;
         Ok(())
     }
@@ -288,8 +334,15 @@ impl Store {
             "SELECT json_extract(link, '$.folder') AS f, COUNT(*) FROM notes \
              WHERE archived = 0 AND deleted_at IS NULL AND link IS NOT NULL AND f IS NOT NULL GROUP BY f",
         )?;
-        let mut v: Vec<(String, i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-        let rank = |f: &str| crate::folders::FOLDERS.iter().position(|d| *d == f).unwrap_or(usize::MAX);
+        let mut v: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let rank = |f: &str| {
+            crate::folders::FOLDERS
+                .iter()
+                .position(|d| *d == f)
+                .unwrap_or(usize::MAX)
+        };
         v.sort_by(|a, b| (rank(&a.0), &a.0).cmp(&(rank(&b.0), &b.0)));
         Ok(v)
     }
@@ -331,7 +384,9 @@ impl Store {
     /// Tab colour, "#rrggbb" or None. Anything else is rejected.
     pub fn set_color(&mut self, id: Uuid, color: Option<&str>) -> rusqlite::Result<Note> {
         if let Some(c) = color.filter(|c| !valid_color(c)) {
-            return Err(rusqlite::Error::InvalidParameterName(format!("not a #rrggbb colour: {c}")));
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "not a #rrggbb colour: {c}"
+            )));
         }
         self.edit(id, |n| n.color = color.map(str::to_owned))
     }
@@ -417,8 +472,16 @@ impl Store {
         if fts_query.is_empty() {
             return if saves { self.saves() } else { self.list() };
         }
-        let kind = if saves { "n.link IS NOT NULL" } else { "n.link IS NULL" };
-        let cols = NOTE_COLUMNS.split(", ").map(|c| format!("n.{c}")).collect::<Vec<_>>().join(", ");
+        let kind = if saves {
+            "n.link IS NOT NULL"
+        } else {
+            "n.link IS NULL"
+        };
+        let cols = NOTE_COLUMNS
+            .split(", ")
+            .map(|c| format!("n.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols} FROM notes_fts f JOIN notes n ON n.id = f.note_id \
              WHERE notes_fts MATCH ?1 AND n.archived = 0 AND n.deleted_at IS NULL AND {kind} \
@@ -430,7 +493,11 @@ impl Store {
 
     /// What to send to `/v1/sync`: every queued note with the server state it started from.
     pub fn sync_request(&self) -> rusqlite::Result<SyncRequest> {
-        let cols = NOTE_COLUMNS.split(", ").map(|c| format!("n.{c}")).collect::<Vec<_>>().join(", ");
+        let cols = NOTE_COLUMNS
+            .split(", ")
+            .map(|c| format!("n.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {cols}, n.synced_version, n.synced_hash, n.synced_meta FROM sync_queue q JOIN notes n ON n.id = q.note_id \
              ORDER BY q.queued_at, q.note_id"
@@ -445,10 +512,16 @@ impl Store {
                     }),
                     _ => None,
                 };
-                Ok(Change { note: note_from_row(r)?, base })
+                Ok(Change {
+                    note: note_from_row(r)?,
+                    base,
+                })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(SyncRequest { cursor: self.cursor()?, changes })
+        Ok(SyncRequest {
+            cursor: self.cursor()?,
+            changes,
+        })
     }
 
     /// Applies the server's answer to `sent`, in one transaction. Notes edited while the request
@@ -497,14 +570,18 @@ impl Store {
     /// The server sequence this device has synced up to.
     pub fn cursor(&self) -> rusqlite::Result<i64> {
         self.conn
-            .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| {
+                r.get(0)
+            })
             .optional()
             .map(|c| c.unwrap_or(0))
     }
 
     /// IDs of notes changed since the last successful sync, oldest change first.
     pub fn pending_sync(&self) -> rusqlite::Result<Vec<Uuid>> {
-        let mut stmt = self.conn.prepare("SELECT note_id FROM sync_queue ORDER BY queued_at, note_id")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT note_id FROM sync_queue ORDER BY queued_at, note_id")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.map(|r| r.and_then(|s| parse_uuid(0, &s))).collect()
     }
@@ -551,7 +628,12 @@ fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
 fn set_synced(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE notes SET synced_version = ?2, synced_hash = ?3, synced_meta = ?4 WHERE id = ?1",
-        params![n.id.to_string(), n.version, body_hash(&n.body) as i64, meta_hash(n) as i64],
+        params![
+            n.id.to_string(),
+            n.version,
+            body_hash(&n.body) as i64,
+            meta_hash(n) as i64
+        ],
     )?;
     Ok(())
 }
@@ -560,9 +642,21 @@ fn synced_base(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<Base>> {
     conn.query_row(
         "SELECT synced_version, synced_hash, synced_meta FROM notes WHERE id = ?1",
         [id.to_string()],
-        |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        },
     )
-    .map(|(v, h, m)| Some(Base { version: v?, body_hash: h? as u64, meta_hash: m.map(|m| m as u64) }))
+    .map(|(v, h, m)| {
+        Some(Base {
+            version: v?,
+            body_hash: h? as u64,
+            meta_hash: m.map(|m| m as u64),
+        })
+    })
 }
 
 /// Notes from the network are untrusted: the title is rederived and a bad colour dropped.
@@ -577,11 +671,14 @@ fn sanitize(mut n: Note) -> Note {
 }
 
 fn extra_json(n: &Note) -> Option<String> {
-    (!n.extra.is_empty()).then(|| serde_json::to_string(&n.extra).expect("a JSON map always serialises"))
+    (!n.extra.is_empty())
+        .then(|| serde_json::to_string(&n.extra).expect("a JSON map always serialises"))
 }
 
 fn link_json(n: &Note) -> Option<String> {
-    n.link.as_ref().map(|l| serde_json::to_string(l).expect("Link always serialises"))
+    n.link
+        .as_ref()
+        .map(|l| serde_json::to_string(l).expect("Link always serialises"))
 }
 
 fn index_and_queue(conn: &Connection, note: &Note, now: i64) -> rusqlite::Result<()> {
@@ -621,11 +718,19 @@ fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
         updated_at: r.get(7)?,
         device_id: r.get(8)?,
         version: r.get(9)?,
-        conflict_of: r.get::<_, Option<String>>(10)?.map(|s| parse_uuid(10, &s)).transpose()?,
+        conflict_of: r
+            .get::<_, Option<String>>(10)?
+            .map(|s| parse_uuid(10, &s))
+            .transpose()?,
         color: r.get(11)?,
         // A link that does not parse (hand-edited or from a future version) leaves an ordinary note.
-        link: r.get::<_, Option<String>>(12)?.and_then(|s| serde_json::from_str(&s).ok()),
-        extra: r.get::<_, Option<String>>(13)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+        link: r
+            .get::<_, Option<String>>(12)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        extra: r
+            .get::<_, Option<String>>(13)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -635,21 +740,33 @@ fn searchable(n: &Note) -> String {
         None => n.body.clone(),
         Some(l) => {
             let url_words = l.url.replace(['/', '.', '?', '=', '&', '-', '_', '@'], " ");
-            [Some(n.body.as_str()), Some(url_words.as_str()), l.title.as_deref(), l.author.as_deref(), l.text.as_deref(), l.folder.as_deref()]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("\n")
+            [
+                Some(n.body.as_str()),
+                Some(url_words.as_str()),
+                l.title.as_deref(),
+                l.author.as_deref(),
+                l.text.as_deref(),
+                l.folder.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n")
         }
     }
 }
 
 fn parse_uuid(col: usize, s: &str) -> rusqlite::Result<Uuid> {
-    Uuid::parse_str(s).map_err(|e| rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, e.into()))
+    Uuid::parse_str(s).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(col, rusqlite::types::Type::Text, e.into())
+    })
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -663,23 +780,39 @@ mod tests {
     #[test]
     fn saving_the_same_post_twice_returns_the_first_save() {
         let mut s = store();
-        let (a, new_a) = s.create_save("https://x.com/b4dgerr/status/2121498943662023026?s=19").unwrap();
-        let (b, new_b) = s.create_save("look: https://twitter.com/b4dgerr/status/2121498943662023026?t=x").unwrap();
+        let (a, new_a) = s
+            .create_save("https://x.com/b4dgerr/status/2121498943662023026?s=19")
+            .unwrap();
+        let (b, new_b) = s
+            .create_save("look: https://twitter.com/b4dgerr/status/2121498943662023026?t=x")
+            .unwrap();
         assert!(new_a && !new_b);
         assert_eq!(a.id, b.id);
         assert_eq!(s.saves().unwrap().len(), 1);
         // Once deleted, saving it again makes a new save.
         s.delete(a.id).unwrap();
-        assert!(s.create_save("https://x.com/b4dgerr/status/2121498943662023026").unwrap().1);
+        assert!(
+            s.create_save("https://x.com/b4dgerr/status/2121498943662023026")
+                .unwrap()
+                .1
+        );
     }
 
     #[test]
     fn saves_and_notes_are_listed_and_searched_apart() {
         let mut s = store();
         let n = s.create("chess openings to learn").unwrap();
-        let (v, _) = s.create_save("https://www.instagram.com/reel/DftSYUwtKNT/").unwrap();
-        assert_eq!(s.list().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), vec![n.id]);
-        assert_eq!(s.saves().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), vec![v.id]);
+        let (v, _) = s
+            .create_save("https://www.instagram.com/reel/DftSYUwtKNT/")
+            .unwrap();
+        assert_eq!(
+            s.list().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![n.id]
+        );
+        assert_eq!(
+            s.saves().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(),
+            vec![v.id]
+        );
         assert_eq!(s.search("chess").unwrap().len(), 1);
         assert!(s.search("instagram").unwrap().is_empty());
         // URL words and the folder are searchable among saves.
@@ -724,7 +857,12 @@ mod tests {
     /// A save made `days_ago` days before `now`.
     fn aged_save(s: &mut Store, url: &str, now: i64, days_ago: i64) -> Uuid {
         let (n, _) = s.create_save(url).unwrap();
-        s.conn.execute("UPDATE notes SET created_at = ?2 WHERE id = ?1", params![n.id.to_string(), now - days_ago * DAY]).unwrap();
+        s.conn
+            .execute(
+                "UPDATE notes SET created_at = ?2 WHERE id = ?1",
+                params![n.id.to_string(), now - days_ago * DAY],
+            )
+            .unwrap();
         n.id
     }
 
@@ -742,9 +880,19 @@ mod tests {
         s.set_save_done(done, true).unwrap();
         let plan = s.digest_plan(today, 3, 3).unwrap();
         let ids = |d: &Vec<Note>| d.iter().map(|n| n.id).collect::<Vec<_>>();
-        assert_eq!(ids(&plan[0]), vec![week, old, mid], "week-old first, then never opened, oldest first");
-        assert!(!plan.iter().flatten().any(|n| n.id == done), "never a done save");
-        assert!(!plan[0].iter().chain(&plan[1]).any(|n| n.id == fresh), "a save waits a day before it comes back");
+        assert_eq!(
+            ids(&plan[0]),
+            vec![week, old, mid],
+            "week-old first, then never opened, oldest first"
+        );
+        assert!(
+            !plan.iter().flatten().any(|n| n.id == done),
+            "never a done save"
+        );
+        assert!(
+            !plan[0].iter().chain(&plan[1]).any(|n| n.id == fresh),
+            "a save waits a day before it comes back"
+        );
         assert!(plan[2].iter().any(|n| n.id == fresh));
         // Day two: the opened one gets its turn before anyone repeats.
         assert_eq!(plan[1][0].id, opened);
@@ -773,17 +921,29 @@ mod tests {
     }
 
     fn preview(title: &str, canonical: Option<&str>) -> Preview {
-        Preview { title: Some(title.into()), text: Some(title.into()), canonical: canonical.map(Into::into), ..Preview::default() }
+        Preview {
+            title: Some(title.into()),
+            text: Some(title.into()),
+            canonical: canonical.map(Into::into),
+            ..Preview::default()
+        }
     }
 
     #[test]
     fn details_fill_the_save_pick_a_folder_and_make_it_searchable() {
         let mut s = store();
-        let (v, _) = s.create_save("https://www.instagram.com/reel/DftSYUwtKNT/").unwrap();
+        let (v, _) = s
+            .create_save("https://www.instagram.com/reel/DftSYUwtKNT/")
+            .unwrap();
         assert_eq!(s.saves_needing_details(10).unwrap().len(), 1);
-        let n = s.set_save_details(v.id, &preview("5 minute dal recipe", None)).unwrap();
+        let n = s
+            .set_save_details(v.id, &preview("5 minute dal recipe", None))
+            .unwrap();
         let l = n.link.unwrap();
-        assert_eq!((l.title.as_deref(), l.folder.as_deref()), (Some("5 minute dal recipe"), Some("Recipes")));
+        assert_eq!(
+            (l.title.as_deref(), l.folder.as_deref()),
+            (Some("5 minute dal recipe"), Some("Recipes"))
+        );
         assert!(l.fetched_at.is_some());
         assert!(s.saves_needing_details(10).unwrap().is_empty());
         assert_eq!(s.search_saves("dal").unwrap()[0].id, v.id);
@@ -795,7 +955,9 @@ mod tests {
         let mut s = store();
         let (v, _) = s.create_save("https://x.com/a/status/1").unwrap();
         s.set_save_folder(v.id, Some("Gifts for Maa")).unwrap();
-        let n = s.set_save_details(v.id, &preview("new workout plan", None)).unwrap();
+        let n = s
+            .set_save_details(v.id, &preview("new workout plan", None))
+            .unwrap();
         assert_eq!(n.link.unwrap().folder.as_deref(), Some("Gifts for Maa"));
     }
 
@@ -803,35 +965,59 @@ mod tests {
     fn a_threads_short_link_takes_the_post_address_and_duplicates_collapse() {
         let mut s = store();
         let post = "https://www.threads.com/@nick_saraev/post/Dfui2UBE4Sv";
-        let (a, _) = s.create_save("https://www.threads.com/share/_7fwIRJAV").unwrap();
-        let a2 = s.set_save_details(a.id, &preview("Meta open sourced", Some(&format!("{post}?xmt=1")))).unwrap();
+        let (a, _) = s
+            .create_save("https://www.threads.com/share/_7fwIRJAV")
+            .unwrap();
+        let a2 = s
+            .set_save_details(
+                a.id,
+                &preview("Meta open sourced", Some(&format!("{post}?xmt=1"))),
+            )
+            .unwrap();
         assert_eq!(a2.link.unwrap().url, post);
         // Sharing the same post again gives a new short link; once fetched it folds into the first.
-        let (b, new) = s.create_save("https://www.threads.com/share/_oANR7c7l").unwrap();
+        let (b, new) = s
+            .create_save("https://www.threads.com/share/_oANR7c7l")
+            .unwrap();
         assert!(new);
-        let kept = s.set_save_details(b.id, &preview("Meta open sourced", Some(post))).unwrap();
+        let kept = s
+            .set_save_details(b.id, &preview("Meta open sourced", Some(post)))
+            .unwrap();
         assert_eq!(kept.id, a.id);
         assert_eq!(s.saves().unwrap().len(), 1);
         // A canonical address on another site is not trusted.
         let (c, _) = s.create_save("https://x.com/a/status/2").unwrap();
-        let c2 = s.set_save_details(c.id, &preview("t", Some("https://evil.example/x"))).unwrap();
+        let c2 = s
+            .set_save_details(c.id, &preview("t", Some("https://evil.example/x")))
+            .unwrap();
         assert_eq!(c2.link.unwrap().url, "https://x.com/a/status/2");
     }
 
     #[test]
     fn failed_fetches_wait_then_give_up() {
         let mut s = store();
-        let (v, _) = s.create_save("https://www.youtube.com/watch?v=hdMszZ2ah5Q").unwrap();
+        let (v, _) = s
+            .create_save("https://www.youtube.com/watch?v=hdMszZ2ah5Q")
+            .unwrap();
         s.record_fetch_failure(v.id).unwrap();
-        assert!(s.saves_needing_details(10).unwrap().is_empty(), "waits a minute after a failure");
-        s.conn.execute("UPDATE fetch_attempts SET next_at = 0", []).unwrap();
+        assert!(
+            s.saves_needing_details(10).unwrap().is_empty(),
+            "waits a minute after a failure"
+        );
+        s.conn
+            .execute("UPDATE fetch_attempts SET next_at = 0", [])
+            .unwrap();
         assert_eq!(s.saves_needing_details(10).unwrap().len(), 1, "due again");
         for _ in 0..5 {
             s.record_fetch_failure(v.id).unwrap();
         }
         let l = s.get(v.id).unwrap().unwrap().link.unwrap();
         assert!(l.fetched_at.is_some(), "stops trying after the last wait");
-        assert_eq!(l.folder.as_deref(), Some("Watch Later"), "folder by platform when nothing was read");
+        assert_eq!(
+            l.folder.as_deref(),
+            Some("Watch Later"),
+            "folder by platform when nothing was read"
+        );
     }
 
     #[test]
@@ -869,9 +1055,15 @@ mod tests {
     fn color_is_stored_and_validated() {
         let mut s = store();
         let n = s.create("tab me").unwrap();
-        assert_eq!(s.set_color(n.id, Some("#3b82f6")).unwrap().color.as_deref(), Some("#3b82f6"));
+        assert_eq!(
+            s.set_color(n.id, Some("#3b82f6")).unwrap().color.as_deref(),
+            Some("#3b82f6")
+        );
         assert!(s.set_color(n.id, Some("blue")).is_err());
-        assert_eq!(s.get(n.id).unwrap().unwrap().color.as_deref(), Some("#3b82f6"));
+        assert_eq!(
+            s.get(n.id).unwrap().unwrap().color.as_deref(),
+            Some("#3b82f6")
+        );
         assert_eq!(s.set_color(n.id, None).unwrap().color, None);
     }
 
@@ -931,7 +1123,8 @@ mod tests {
         let mut s = store();
         s.create("he said \"hi\" (AND) NOT * ^").unwrap();
         for q in ["\"", "AND", "(", "NOT *", "^", "a\"b", "   "] {
-            s.search(q).unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
+            s.search(q)
+                .unwrap_or_else(|e| panic!("query {q:?} failed: {e}"));
         }
     }
 
@@ -953,8 +1146,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("edge-notes-test-{}", Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.db");
-        let id = Store::open(&path, "d").unwrap().create("persist me").unwrap().id;
-        let body = Store::open(&path, "d").unwrap().get(id).unwrap().unwrap().body;
+        let id = Store::open(&path, "d")
+            .unwrap()
+            .create("persist me")
+            .unwrap()
+            .id;
+        let body = Store::open(&path, "d")
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .unwrap()
+            .body;
         assert_eq!(body, "persist me");
         // Store is dropped by now; Windows refuses to delete an open database file.
         std::fs::remove_dir_all(dir).unwrap();

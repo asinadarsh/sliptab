@@ -3,8 +3,7 @@ use uuid::Uuid;
 use crate::link::Link;
 
 /// One note. Timestamps are milliseconds since the Unix epoch, taken from the device clock.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Note {
     /// UUIDv7, created on the device so offline notes never collide.
     pub id: Uuid,
@@ -61,14 +60,22 @@ const MAX_TITLE_CHARS: usize = 120;
 
 /// Title = first non-blank line, without checklist or heading markers.
 pub fn derive_title(body: &str) -> String {
-    let line = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     let line = ["- [ ] ", "- [x] ", "- [X] "]
         .iter()
         .find_map(|p| line.strip_prefix(p))
         .unwrap_or(line)
         .trim_start_matches('#')
         .trim();
-    crate::format::plain(line).trim().chars().take(MAX_TITLE_CHARS).collect()
+    crate::format::plain(line)
+        .trim()
+        .chars()
+        .take(MAX_TITLE_CHARS)
+        .collect()
 }
 
 #[cfg(test)]
@@ -77,7 +84,10 @@ mod tests {
 
     #[test]
     fn title_drops_formatting_markers() {
-        assert_eq!(derive_title("**Launch** plan for __Q4__\nmore"), "Launch plan for Q4");
+        assert_eq!(
+            derive_title("**Launch** plan for __Q4__\nmore"),
+            "Launch plan for Q4"
+        );
     }
 
     #[test]

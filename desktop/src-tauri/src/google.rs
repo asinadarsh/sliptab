@@ -21,7 +21,10 @@ pub fn sign_in() -> Result<String, String> {
         return Err("Google sign-in isn't set up in this build.".into());
     };
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let redirect = format!("http://127.0.0.1:{}", listener.local_addr().map_err(|e| e.to_string())?.port());
+    let redirect = format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().map_err(|e| e.to_string())?.port()
+    );
     let verifier = random_b64(32)?;
     let challenge = b64(&Sha256::digest(verifier.as_bytes()));
     let state = random_b64(16)?;
@@ -35,12 +38,21 @@ pub fn sign_in() -> Result<String, String> {
     open_browser(&url)?;
 
     let params = wait_for_redirect(&listener)?;
-    let get = |k: &str| params.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    let get = |k: &str| {
+        params
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.as_str())
+    };
     if get("state") != Some(state.as_str()) {
         return Err("Sign-in was interrupted. Please try again.".into());
     }
     if let Some(e) = get("error") {
-        return Err(if e == "access_denied" { "Sign-in was cancelled.".into() } else { format!("Google said: {e}") });
+        return Err(if e == "access_denied" {
+            "Sign-in was cancelled.".into()
+        } else {
+            format!("Google said: {e}")
+        });
     }
     let code = get("code").ok_or("Google sent no code.")?;
 
@@ -60,7 +72,12 @@ pub fn sign_in() -> Result<String, String> {
         .map_err(|_| "You're offline. Try again when you're connected.".to_string())?;
     let body: serde_json::Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
     body["id_token"].as_str().map(str::to_owned).ok_or_else(|| {
-        format!("Google refused the sign-in: {}", body["error_description"].as_str().unwrap_or("unknown error"))
+        format!(
+            "Google refused the sign-in: {}",
+            body["error_description"]
+                .as_str()
+                .unwrap_or("unknown error")
+        )
     })
 }
 
@@ -100,9 +117,9 @@ fn wait_for_redirect(listener: &TcpListener) -> Result<Vec<(String, String)>, St
     Err("Sign-in timed out. Please try again.".into())
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Edge</title>\
+const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Sliptab</title>\
 <body style=\"font:16px system-ui;display:grid;place-items:center;height:90vh;color:#444\">\
-<div>You're signed in to Edge. You can close this tab.</div>";
+<div>You're signed in to Sliptab. You can close this tab.</div>";
 
 pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
@@ -110,8 +127,11 @@ pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let cmd = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let cmd = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
-    cmd.map(drop).map_err(|e| format!("Couldn't open the browser: {e}"))
+    let cmd = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
+    cmd.map(drop)
+        .map_err(|e| format!("Couldn't open the browser: {e}"))
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -128,7 +148,9 @@ fn random_b64(n: usize) -> Result<String, String> {
 fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -142,7 +164,11 @@ fn parse_query(q: &str) -> Vec<(String, String)> {
         let mut i = 0;
         while i < b.len() {
             let hex = (b[i] == b'%' && i + 2 < b.len())
-                .then(|| std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()))
+                .then(|| {
+                    std::str::from_utf8(&b[i + 1..i + 3])
+                        .ok()
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                })
                 .flatten();
             match hex {
                 Some(v) => {
@@ -157,7 +183,11 @@ fn parse_query(q: &str) -> Vec<(String, String)> {
         }
         String::from_utf8_lossy(&out).into_owned()
     };
-    q.split('&').filter(|p| !p.is_empty()).map(|p| p.split_once('=').unwrap_or((p, ""))).map(|(k, v)| (dec(k), dec(v))).collect()
+    q.split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.split_once('=').unwrap_or((p, "")))
+        .map(|(k, v)| (dec(k), dec(v)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -166,19 +196,28 @@ mod tests {
 
     #[test]
     fn query_round_trip() {
-        assert_eq!(enc("http://127.0.0.1:5000"), "http%3A%2F%2F127.0.0.1%3A5000");
+        assert_eq!(
+            enc("http://127.0.0.1:5000"),
+            "http%3A%2F%2F127.0.0.1%3A5000"
+        );
         let p = parse_query("state=ab_c&code=4%2F0Ab-x%3D&scope=email+openid&x");
         assert_eq!(p[0], ("state".into(), "ab_c".into()));
         assert_eq!(p[1], ("code".into(), "4/0Ab-x=".into()));
         assert_eq!(p[2], ("scope".into(), "email openid".into()));
         assert_eq!(p[3], ("x".into(), String::new()));
-        assert_eq!(parse_query("bad=%zz%4"), vec![("bad".into(), "%zz%4".into())]);
+        assert_eq!(
+            parse_query("bad=%zz%4"),
+            vec![("bad".into(), "%zz%4".into())]
+        );
     }
 
     #[test]
     fn pkce_challenge_matches_rfc7636() {
         // RFC 7636 appendix B.
         let v = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-        assert_eq!(b64(&Sha256::digest(v.as_bytes())), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        assert_eq!(
+            b64(&Sha256::digest(v.as_bytes())),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 }

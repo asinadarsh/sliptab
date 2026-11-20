@@ -13,8 +13,7 @@ use crate::link::Link;
 use crate::note::{derive_title, Note};
 
 /// The server state a device last saw for a note. None for a note made on this device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Base {
     pub version: i64,
     pub body_hash: u64,
@@ -25,21 +24,23 @@ pub struct Base {
 
 impl Base {
     pub fn of(n: &Note) -> Self {
-        Base { version: n.version, body_hash: body_hash(&n.body), meta_hash: Some(meta_hash(n)) }
+        Base {
+            version: n.version,
+            body_hash: body_hash(&n.body),
+            meta_hash: Some(meta_hash(n)),
+        }
     }
 }
 
 /// One note a device changed, with the server state it started from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Change {
     pub note: Note,
     pub base: Option<Base>,
 }
 
 /// `POST /v1/sync` body: my changes, and the last server sequence number I have seen.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SyncRequest {
     pub cursor: i64,
     pub changes: Vec<Change>,
@@ -47,8 +48,7 @@ pub struct SyncRequest {
 
 /// Every note stored after `cursor` (including the ones just sent, as the server merged them,
 /// and tombstones of deleted notes) and the new cursor.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SyncResponse {
     pub cursor: i64,
     pub notes: Vec<Note>,
@@ -68,13 +68,20 @@ pub struct Merged {
 /// FNV-1a: stable across Rust versions and platforms, unlike `std`'s hasher, so a hash made on a
 /// phone matches one made on the server.
 pub fn body_hash(body: &str) -> u64 {
-    body.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+    body.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// The fields besides the text that a user sets: pin, archive and tab colour, and for a save its
 /// folder and done mark. A note without a link hashes exactly as before saves existed.
 pub fn meta_hash(n: &Note) -> u64 {
-    let mut s = format!("{}|{}|{}", n.pinned, n.archived, n.color.as_deref().unwrap_or(""));
+    let mut s = format!(
+        "{}|{}|{}",
+        n.pinned,
+        n.archived,
+        n.color.as_deref().unwrap_or("")
+    );
     if let Some(l) = &n.link {
         s += &format!("|{}|{}", l.folder.as_deref().unwrap_or(""), l.done);
     }
@@ -88,30 +95,54 @@ pub fn merge(base: Option<Base>, mine: &Note, theirs: &Note) -> Merged {
     debug_assert_eq!(mine.id, theirs.id);
     if let Some(b) = base {
         if theirs.version == b.version && body_hash(&theirs.body) == b.body_hash {
-            return Merged { note: mine.clone(), copy: None }; // only I changed it
+            return Merged {
+                note: mine.clone(),
+                copy: None,
+            }; // only I changed it
         }
         if mine.version == b.version && body_hash(&mine.body) == b.body_hash {
-            return Merged { note: theirs.clone(), copy: None }; // only they changed it
+            return Merged {
+                note: theirs.clone(),
+                copy: None,
+            }; // only they changed it
         }
     }
     if same_content(mine, theirs) {
-        return Merged { note: later(mine, theirs).clone(), copy: None };
+        return Merged {
+            note: later(mine, theirs).clone(),
+            copy: None,
+        };
     }
 
     // Both changed. Pin, archive and colour come from the side that changed them; if both did,
     // the later edit wins.
     let newer = later(mine, theirs);
-    let older = if std::ptr::eq(newer, mine) { theirs } else { mine };
+    let older = if std::ptr::eq(newer, mine) {
+        theirs
+    } else {
+        mine
+    };
     let mut note = newer.clone();
     note.version = mine.version.max(theirs.version) + 1;
     let base_meta = base.and_then(|b| b.meta_hash);
-    let meta_from = match (base_meta != Some(meta_hash(mine)), base_meta != Some(meta_hash(theirs))) {
+    let meta_from = match (
+        base_meta != Some(meta_hash(mine)),
+        base_meta != Some(meta_hash(theirs)),
+    ) {
         (true, false) => mine,
         (false, true) => theirs,
         _ => newer,
     };
-    (note.pinned, note.archived, note.color) = (meta_from.pinned, meta_from.archived, meta_from.color.clone());
-    note.link = merge_link(mine.link.as_ref(), theirs.link.as_ref(), meta_from.link.as_ref());
+    (note.pinned, note.archived, note.color) = (
+        meta_from.pinned,
+        meta_from.archived,
+        meta_from.color.clone(),
+    );
+    note.link = merge_link(
+        mine.link.as_ref(),
+        theirs.link.as_ref(),
+        meta_from.link.as_ref(),
+    );
 
     let base_hash = base.map(|b| b.body_hash);
     let mine_changed = base_hash != Some(body_hash(&mine.body));
@@ -145,7 +176,11 @@ fn merge_link(a: Option<&Link>, b: Option<&Link>, meta_from: Option<&Link>) -> O
         (Some(a), Some(b)) => (a, b),
         (one, other) => return one.or(other).cloned(),
     };
-    let mut l = if b.fetched_at > a.fetched_at { b.clone() } else { a.clone() };
+    let mut l = if b.fetched_at > a.fetched_at {
+        b.clone()
+    } else {
+        a.clone()
+    };
     if let Some(m) = meta_from {
         (l.folder, l.done) = (m.folder.clone(), m.done);
     }
@@ -163,8 +198,21 @@ fn later<'a>(a: &'a Note, b: &'a Note) -> &'a Note {
 }
 
 fn same_content(a: &Note, b: &Note) -> bool {
-    (&a.body, a.pinned, a.archived, a.deleted_at.is_some(), &a.color, &a.link)
-        == (&b.body, b.pinned, b.archived, b.deleted_at.is_some(), &b.color, &b.link)
+    (
+        &a.body,
+        a.pinned,
+        a.archived,
+        a.deleted_at.is_some(),
+        &a.color,
+        &a.link,
+    ) == (
+        &b.body,
+        b.pinned,
+        b.archived,
+        b.deleted_at.is_some(),
+        &b.color,
+        &b.link,
+    )
 }
 
 fn conflict_copy(loser: &Note, of: Uuid) -> Note {
@@ -250,7 +298,10 @@ mod tests {
         let edited = note("milk and eggs", 4, 20, "phone"); // ...text edited later
         for (a, b) in [(&pinned, &edited), (&edited, &pinned)] {
             let m = merge(Some(Base::of(&base)), a, b);
-            assert_eq!((m.note.body.as_str(), m.note.pinned), ("milk and eggs", true));
+            assert_eq!(
+                (m.note.body.as_str(), m.note.pinned),
+                ("milk and eggs", true)
+            );
             assert_eq!(m.note.color.as_deref(), Some("#3b82f6"));
         }
     }
@@ -267,7 +318,10 @@ mod tests {
         assert_eq!(copy.conflict_of, Some(m.note.id));
         assert_ne!(copy.id, m.note.id);
         // Same winner from the other side.
-        assert_eq!(merge(Some(Base::of(&base)), &laptop, &phone).note.body, "oat milk");
+        assert_eq!(
+            merge(Some(Base::of(&base)), &laptop, &phone).note.body,
+            "oat milk"
+        );
     }
 
     #[test]
@@ -287,7 +341,10 @@ mod tests {
         pinned.pinned = true;
         pinned.version = 4;
         pinned.updated_at = 20;
-        assert!(merge(Some(Base::of(&base)), &deleted, &pinned).note.deleted_at.is_some());
+        assert!(merge(Some(Base::of(&base)), &deleted, &pinned)
+            .note
+            .deleted_at
+            .is_some());
     }
 
     #[test]

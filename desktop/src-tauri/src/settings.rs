@@ -67,7 +67,11 @@ impl Default for Settings {
 impl Settings {
     /// Clamp values a hand-edited or older file could get wrong.
     pub fn sanitized(mut self) -> Self {
-        self.bar_position = if self.bar_position.is_finite() { self.bar_position.clamp(0.0, 1.0) } else { 0.5 };
+        self.bar_position = if self.bar_position.is_finite() {
+            self.bar_position.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
         self.panel_width = self.panel_width.filter(|w| w.is_finite() && *w > 0.0);
         self.bar_color = self.bar_color.filter(|c| notes_core::valid_color(c));
         self
@@ -88,7 +92,10 @@ pub fn load(dir: &Path) -> Settings {
 /// Write to a temp file and rename, so a crash mid-write never leaves a half-written file.
 pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
     let tmp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(settings).map_err(std::io::Error::other)?)?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(settings).map_err(std::io::Error::other)?,
+    )?;
     std::fs::rename(tmp, dir.join(FILE))
 }
 
@@ -98,18 +105,34 @@ mod tests {
 
     #[test]
     fn round_trip_and_bad_file_falls_back_to_defaults() {
-        let dir = std::env::temp_dir().join(format!("edge-settings-{}", notes_core::Uuid::now_v7()));
+        let dir =
+            std::env::temp_dir().join(format!("edge-settings-{}", notes_core::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(load(&dir).hotkey, crate::hotkey::DEFAULT);
-        save(&dir, &Settings { hotkey: "Ctrl+Shift+K".into(), side: Side::Left, ..Default::default() }).unwrap();
+        save(
+            &dir,
+            &Settings {
+                hotkey: "Ctrl+Shift+K".into(),
+                side: Side::Left,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(load(&dir).side, Side::Left);
         assert_eq!(load(&dir).hotkey, "Ctrl+Shift+K");
         std::fs::write(dir.join(FILE), "{not json").unwrap();
         assert_eq!(load(&dir).hotkey, crate::hotkey::DEFAULT);
         // An old file with only some fields, and out-of-range values, still loads.
-        std::fs::write(dir.join(FILE), r#"{"hotkey":"Alt+K","barPosition":7,"panelWidth":-3,"barColor":"red;x"}"#).unwrap();
+        std::fs::write(
+            dir.join(FILE),
+            r#"{"hotkey":"Alt+K","barPosition":7,"panelWidth":-3,"barColor":"red;x"}"#,
+        )
+        .unwrap();
         let s = load(&dir);
-        assert_eq!((s.hotkey.as_str(), s.bar_position, s.panel_width, s.show_bar), ("Alt+K", 1.0, None, true));
+        assert_eq!(
+            (s.hotkey.as_str(), s.bar_position, s.panel_width, s.show_bar),
+            ("Alt+K", 1.0, None, true)
+        );
         assert_eq!((s.bar_color, s.layout), (None, Layout::Cards));
         std::fs::remove_dir_all(dir).unwrap();
     }

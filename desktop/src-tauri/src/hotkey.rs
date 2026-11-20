@@ -16,7 +16,11 @@ use tauri::{AppHandle, Emitter, Manager};
 /// - Super+N is GNOME's "focus notification"; Super+Shift+N is unbound in GNOME and not a Windows shortcut.
 /// - Ctrl+Alt+<letter> is avoided on Windows/Linux because Ctrl+Alt is AltGr on many keyboard layouts.
 /// - macOS: Cmd+Shift+N is "new folder" in Finder; Control+Option+N is unused by the system.
-pub const DEFAULT: &str = if cfg!(target_os = "macos") { "Control+Alt+N" } else { "Super+Shift+N" };
+pub const DEFAULT: &str = if cfg!(target_os = "macos") {
+    "Control+Alt+N"
+} else {
+    "Super+Shift+N"
+};
 
 /// Emitted to the webview when the hotkey is pressed.
 pub const PRESSED_EVENT: &str = "edge-hotkey";
@@ -47,7 +51,11 @@ pub fn use_portal() -> bool {
 }
 
 pub fn status(app: &AppHandle) -> Status {
-    app.state::<Hotkey>().status.lock().map(|s| s.clone()).unwrap_or_default()
+    app.state::<Hotkey>()
+        .status
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
 }
 
 fn set_status(app: &AppHandle, status: Status) {
@@ -63,7 +71,8 @@ pub fn apply(app: &AppHandle, accelerator: &str, previous: Option<&str>) -> Resu
     if use_portal() {
         #[cfg(target_os = "linux")]
         {
-            let xdg = to_xdg(accelerator).ok_or_else(|| format!("{accelerator} cannot be used as a desktop shortcut"))?;
+            let xdg = to_xdg(accelerator)
+                .ok_or_else(|| format!("{accelerator} cannot be used as a desktop shortcut"))?;
             portal::start(app, accelerator.to_owned(), xdg);
         }
     } else {
@@ -73,17 +82,31 @@ pub fn apply(app: &AppHandle, accelerator: &str, previous: Option<&str>) -> Resu
             let gs = app.global_shortcut();
             let _ = gs.unregister_all();
             if let Err(e) = gs.register(accelerator) {
-                let msg = format!("Could not use {accelerator}: {e}. It may be taken by another app.");
+                let msg =
+                    format!("Could not use {accelerator}: {e}. It may be taken by another app.");
                 // Keep the old hotkey working; at startup there is none, so record the error for settings.
                 let kept = previous.filter(|p| gs.register(*p).is_ok());
                 if kept.is_none() {
-                    set_status(app, Status { accelerator: accelerator.to_owned(), bound: None, portal: false, error: Some(msg.clone()) });
+                    set_status(
+                        app,
+                        Status {
+                            accelerator: accelerator.to_owned(),
+                            bound: None,
+                            portal: false,
+                            error: Some(msg.clone()),
+                        },
+                    );
                 }
                 return Err(msg);
             }
         }
     }
-    let status = Status { accelerator: accelerator.to_owned(), bound: None, portal: use_portal(), error: None };
+    let status = Status {
+        accelerator: accelerator.to_owned(),
+        bound: None,
+        portal: use_portal(),
+        error: None,
+    };
     set_status(app, status.clone());
     Ok(status)
 }
@@ -180,7 +203,12 @@ mod portal {
             if let Err(e) = run(&app, &accelerator, &xdg).await {
                 set_status(
                     &app,
-                    Status { accelerator, bound: None, portal: true, error: Some(format!("Desktop shortcut failed: {e}")) },
+                    Status {
+                        accelerator,
+                        bound: None,
+                        portal: true,
+                        error: Some(format!("Desktop shortcut failed: {e}")),
+                    },
                 );
             }
         }));
@@ -199,14 +227,26 @@ mod portal {
         let portal = GlobalShortcuts::new().await?;
         let session = portal.create_session(Default::default()).await?;
         let id = shortcut_id(xdg);
-        let shortcut = NewShortcut::new(id.as_str(), "Open the Edge notes panel").preferred_trigger(xdg);
-        let bound = portal.bind_shortcuts(&session, &[shortcut], None, Default::default()).await?.response()?;
+        let shortcut =
+            NewShortcut::new(id.as_str(), "Open the Sliptab notes panel").preferred_trigger(xdg);
+        let bound = portal
+            .bind_shortcuts(&session, &[shortcut], None, Default::default())
+            .await?
+            .response()?;
         let trigger = bound
             .shortcuts()
             .iter()
             .find(|s| s.id() == id)
             .map(|s| s.trigger_description().to_owned());
-        set_status(app, Status { accelerator: accelerator.to_owned(), bound: trigger, portal: true, error: None });
+        set_status(
+            app,
+            Status {
+                accelerator: accelerator.to_owned(),
+                bound: trigger,
+                portal: true,
+                error: None,
+            },
+        );
 
         let mut activated = portal.receive_activated().await?;
         while let Some(a) = activated.next().await {
@@ -223,9 +263,12 @@ mod portal {
         let name = format!("applications/{id}.desktop");
         let home = std::env::var_os("XDG_DATA_HOME")
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+            })
             .ok_or_else(|| std::io::Error::other("no HOME"))?;
-        let system = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+        let system =
+            std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
         if std::iter::once(home.clone())
             .chain(system.split(':').map(std::path::PathBuf::from))
             .any(|d| d.join(&name).exists())
@@ -233,13 +276,15 @@ mod portal {
             return Ok(());
         }
         // AppImages run from a temp mount; $APPIMAGE is the real file to launch.
-        let exe = std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).unwrap_or(std::env::current_exe()?);
+        let exe = std::env::var_os("APPIMAGE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or(std::env::current_exe()?);
         let path = home.join(&name);
         std::fs::create_dir_all(path.parent().expect("has parent"))?;
         std::fs::write(
             path,
             format!(
-                "[Desktop Entry]\nType=Application\nName=Edge\nComment=Notes on the edge of your screen\n\
+                "[Desktop Entry]\nType=Application\nName=Sliptab\nComment=Notes on the edge of your screen\n\
                  Exec=\"{}\"\nIcon=edge\nTerminal=false\nCategories=Utility;\n",
                 exe.display()
             ),

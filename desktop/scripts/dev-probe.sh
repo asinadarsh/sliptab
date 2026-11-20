@@ -13,5 +13,5 @@ cd "$(dirname "$0")/.."
 EDGE_PROBE=1 setsid npm run tauri dev > "$LOG" 2>&1 < /dev/null &
 for _ in $(seq 1 120); do grep -qE 'EDGE_PROBE|^error' "$LOG" && break; sleep 2; done
 grep -E 'EDGE_PROBE|^error|panicked' "$LOG" | tail -3
-id=$(xdotool search --name '^Edge$' 2>/dev/null | head -1)
+id=$(xdotool search --name '^Sliptab$' 2>/dev/null | head -1)
 [ -n "$id" ] && xwininfo -id "$id" | grep -E 'Absolute|Width|Height'

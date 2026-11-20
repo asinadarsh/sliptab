@@ -494,7 +494,7 @@
   const signInGoogle = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_in_google")));
   const signOutSync = () => syncStep(async () => void (sync = await invoke<SyncStatus>("sync_sign_out")));
   const deleteAccount = () => {
-    if (!confirm(`Delete the Edge account ${sync.email}? Everything synced to it is deleted from the server and every device is signed out. Notes on this laptop stay.`)) return;
+    if (!confirm(`Delete the Sliptab account ${sync.email}? Everything synced to it is deleted from the server and every device is signed out. Notes on this laptop stay.`)) return;
     void syncStep(async () => void (sync = await invoke<SyncStatus>("sync_delete_account")));
   };
 
@@ -648,7 +648,7 @@
 
 {#snippet closeButtons()}
   {#if !standalone}
-    <button class="ib" onclick={openHome} aria-label="Open the Edge window" title="Open in a window"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></button>
+    <button class="ib" onclick={openHome} aria-label="Open the Sliptab window" title="Open in a window"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></button>
     <button class="ib" onclick={() => edge.escape()} aria-label="Close panel" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   {/if}
 {/snippet}
@@ -839,9 +839,9 @@
   {#if (update || tooOld) && (standalone || shown)}
     <div class="update" class:urgent={tooOld}>
       <span>
-        {#if update?.ready}Edge {update.version} is installed.
-        {:else if update}Edge {update.version} is available.
-        {:else}This version of Edge can no longer sync. Updating…{/if}
+        {#if update?.ready}Sliptab {update.version} is installed.
+        {:else if update}Sliptab {update.version} is available.
+        {:else}This version of Sliptab can no longer sync. Updating…{/if}
       </span>
       {#if update?.ready}
         <button onclick={() => invoke("restart_for_update")}>Restart</button>
@@ -918,7 +918,7 @@
           </div>
         </section>
 
-        <div class="group">Edge</div>
+        <div class="group">Sliptab</div>
         <section class="setting">
           <div class="grow">Screen edge</div>
           <div class="seg" role="group" aria-label="Screen edge">
@@ -1005,7 +1005,7 @@
         {#each saves as n (n.id)}
           {@render saveRow(n, false)}
         {:else}
-          <div class="empty">{query ? "No matches" : "Share a post to Edge on your phone, or paste a link below. Saves land here."}</div>
+          <div class="empty">{query ? "No matches" : "Share a post to Sliptab on your phone, or paste a link below. Saves land here."}</div>
         {/each}
       </div>
       {@render capture("slim")}
