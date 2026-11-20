@@ -68,12 +68,17 @@ pub fn derive_title(body: &str) -> String {
         .unwrap_or(line)
         .trim_start_matches('#')
         .trim();
-    line.chars().take(MAX_TITLE_CHARS).collect()
+    crate::format::plain(line).trim().chars().take(MAX_TITLE_CHARS).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::derive_title;
+
+    #[test]
+    fn title_drops_formatting_markers() {
+        assert_eq!(derive_title("**Launch** plan for __Q4__\nmore"), "Launch plan for Q4");
+    }
 
     #[test]
     fn title_from_first_line() {

@@ -51,6 +51,9 @@ pub struct Me {
     pub trial_ends_at: i64,
     pub paid_until: Option<i64>,
     pub active: bool,
+    /// In the beta: show Saved posts. Absent from older servers, so false.
+    #[serde(default)]
+    pub beta: bool,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +107,22 @@ impl Client {
             .header("authorization", bearer(token))
             .call();
         read::<serde::de::IgnoredAny>(resp).map(|_| ())
+    }
+
+    /// Waits (up to about 25 s, the server's limit) until another device stores something after
+    /// `after`, the device's cursor. True: sync now. False: nothing yet, ask again.
+    pub fn wait_for_changes(&self, token: &str, after: i64) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct Changes {
+            changed: bool,
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(40))) // longer than the server holds it
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let resp = agent.get(format!("{}/v1/changes?after={after}", self.base)).header("authorization", bearer(token)).call();
+        Ok(read::<Changes>(resp)?.is_some_and(|c| c.changed))
     }
 
     /// Deletes the account and everything synced to it. Local notes on this device stay.

@@ -1,0 +1,14 @@
+[
+  { "in": "plain text", "out": [["plain text", ""]] },
+  { "in": "a **bold** word", "out": [["a ", ""], ["**", "m"], ["bold", "b"], ["**", "m"], [" word", ""]] },
+  { "in": "*it* and __under__ and ~~gone~~", "out": [["*", "m"], ["it", "i"], ["*", "m"], [" and ", ""], ["__", "m"], ["under", "u"], ["__", "m"], [" and ", ""], ["~~", "m"], ["gone", "s"], ["~~", "m"]] },
+  { "in": "**__both__**", "out": [["**", "m"], ["__", "bm"], ["both", "bu"], ["__", "bm"], ["**", "m"]] },
+  { "in": "2 * 3 * 4 and a ** b **", "out": [["2 * 3 * 4 and a ** b **", ""]] },
+  { "in": "**not\nclosed** across lines", "out": [["**not\nclosed** across lines", ""]] },
+  { "in": "see https://x.com/a_b_c/status/1?s=2, ok", "out": [["see ", ""], ["https://x.com/a_b_c/status/1?s=2", "l"], [", ok", ""]] },
+  { "in": "(www.example.com/path).", "out": [["(", ""], ["www.example.com/path", "l"], [").", ""]] },
+  { "in": "**read https://a.io** now", "out": [["**", "m"], ["read ", "b"], ["https://a.io", "bl"], ["**", "m"], [" now", ""]] },
+  { "in": "- [ ] buy **milk**", "out": [["- [ ] buy ", ""], ["**", "m"], ["milk", "b"], ["**", "m"]] },
+  { "in": "snake_case_name and __init__", "out": [["snake_case_name and ", ""], ["__", "m"], ["init", "u"], ["__", "m"]] },
+  { "in": "a **** b", "out": [["a **** b", ""]] }
+]

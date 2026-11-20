@@ -494,7 +494,8 @@ impl Store {
         tx.commit()
     }
 
-    fn cursor(&self) -> rusqlite::Result<i64> {
+    /// The server sequence this device has synced up to.
+    pub fn cursor(&self) -> rusqlite::Result<i64> {
         self.conn
             .query_row("SELECT value FROM meta WHERE key = 'cursor'", [], |r| r.get(0))
             .optional()

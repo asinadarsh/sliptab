@@ -2,6 +2,7 @@
 //! Used by the desktop app, the mobile app (via flutter_rust_bridge) and the server.
 
 pub mod folders;
+pub mod format;
 mod link;
 mod note;
 pub mod preview;
