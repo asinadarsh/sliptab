@@ -10,6 +10,18 @@ use serde::{Deserialize, Serialize};
 use crate::store::Store;
 use crate::sync::SyncResponse;
 
+/// "desktop/0.2.0" or "android/1.0.3", sent with every request so the server can tell an app
+/// that is too old to update. Set once at start-up with `set_app`.
+static APP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_app(platform: &str, version: &str) {
+    let _ = APP.set(format!("{platform}/{version}"));
+}
+
+fn app_id() -> &'static str {
+    APP.get().map_or("", String::as_str)
+}
+
 /// The server's limit on changes per request.
 const MAX_CHANGES: usize = 500;
 
@@ -21,6 +33,8 @@ pub enum ClientError {
     SignedOut,
     /// Trial over and not paid.
     SubscriptionRequired,
+    /// This app is older than the server allows: update to keep syncing. Holds the minimum.
+    UpdateRequired(String),
     /// Google's sign-in token was refused (expired, or not for this app).
     GoogleRejected,
     /// The email already belongs to an Edge account linked to another Google account.
@@ -36,6 +50,7 @@ impl std::fmt::Display for ClientError {
             ClientError::SubscriptionRequired => "Your trial has ended. Subscribe to keep syncing.",
             ClientError::GoogleRejected => "Google sign-in didn't go through. Please try again.",
             ClientError::EmailTaken => "This email is already used by another Google account in Edge.",
+            ClientError::UpdateRequired(_) => "This version of Edge is too old to sync. Please update.",
             ClientError::Server(m) => return write!(f, "Sync server error: {m}"),
         })
     }
@@ -54,6 +69,18 @@ pub struct Me {
     /// In the beta: show Saved posts. Absent from older servers, so false.
     #[serde(default)]
     pub beta: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppStatus {
+    pub latest: Option<String>,
+    pub min: Option<String>,
+    /// Where to download the update (the phone; the desktop updater knows on its own).
+    pub url: Option<String>,
+    pub update_available: bool,
+    /// This version can no longer sync.
+    pub update_required: bool,
 }
 
 #[derive(Deserialize)]
@@ -89,14 +116,14 @@ impl Client {
     }
 
     pub fn me(&self, token: &str) -> Result<Me> {
-        let resp = self.agent.get(format!("{}/v1/me", self.base)).header("authorization", bearer(token)).call();
+        let resp = self.agent.get(format!("{}/v1/me", self.base)).header("authorization", bearer(token)).header("x-edge-client", app_id()).call();
         read(resp)?.ok_or_else(|| server("empty answer"))
     }
 
     /// Ends this device's session on the server. Local notes stay.
     pub fn sign_out(&self, token: &str) -> Result<()> {
         // The server finds the current session from the token; "current" is resolved by listing.
-        let resp = self.agent.get(format!("{}/v1/sessions", self.base)).header("authorization", bearer(token)).call();
+        let resp = self.agent.get(format!("{}/v1/sessions", self.base)).header("authorization", bearer(token)).header("x-edge-client", app_id()).call();
         let sessions: Vec<serde_json::Value> = read(resp)?.unwrap_or_default();
         let Some(id) = sessions.iter().find(|s| s["current"] == true).and_then(|s| s["id"].as_str()) else {
             return Ok(());
@@ -104,7 +131,7 @@ impl Client {
         let resp = self
             .agent
             .delete(format!("{}/v1/sessions/{id}", self.base))
-            .header("authorization", bearer(token))
+            .header("authorization", bearer(token)).header("x-edge-client", app_id())
             .call();
         read::<serde::de::IgnoredAny>(resp).map(|_| ())
     }
@@ -121,13 +148,20 @@ impl Client {
             .http_status_as_error(false)
             .build()
             .into();
-        let resp = agent.get(format!("{}/v1/changes?after={after}", self.base)).header("authorization", bearer(token)).call();
+        let resp = agent.get(format!("{}/v1/changes?after={after}", self.base)).header("authorization", bearer(token)).header("x-edge-client", app_id()).call();
         Ok(read::<Changes>(resp)?.is_some_and(|c| c.changed))
+    }
+
+    /// Whether this app should update: the latest version, the minimum allowed, and for the phone
+    /// where to get it. Needs no sign-in. `platform` is "desktop" or "android".
+    pub fn app_status(&self, platform: &str, version: &str) -> Result<AppStatus> {
+        let resp = self.agent.get(format!("{}/v1/app/status?platform={platform}&version={version}", self.base)).call();
+        read(resp)?.ok_or_else(|| server("empty answer"))
     }
 
     /// Deletes the account and everything synced to it. Local notes on this device stay.
     pub fn delete_account(&self, token: &str) -> Result<()> {
-        let resp = self.agent.delete(format!("{}/v1/me", self.base)).header("authorization", bearer(token)).call();
+        let resp = self.agent.delete(format!("{}/v1/me", self.base)).header("authorization", bearer(token)).header("x-edge-client", app_id()).call();
         read::<serde::de::IgnoredAny>(resp).map(|_| ())
     }
 
@@ -152,7 +186,7 @@ impl Client {
     }
 
     fn post<T: serde::de::DeserializeOwned>(&self, path: &str, token: Option<&str>, body: &impl Serialize) -> Result<Option<T>> {
-        let mut req = self.agent.post(format!("{}{path}", self.base));
+        let mut req = self.agent.post(format!("{}{path}", self.base)).header("x-edge-client", app_id());
         if let Some(t) = token {
             req = req.header("authorization", bearer(t));
         }
@@ -259,6 +293,9 @@ fn read<T: serde::de::DeserializeOwned>(
         (401, "google_rejected") => ClientError::GoogleRejected,
         (401, _) => ClientError::SignedOut,
         (402, _) => ClientError::SubscriptionRequired,
+        (426, _) => ClientError::UpdateRequired(
+            serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["min"].as_str().map(str::to_owned)).unwrap_or_default(),
+        ),
         (409, "email_taken") => ClientError::EmailTaken,
         (502..=504, _) => ClientError::Offline(format!("HTTP {status}")),
         _ => ClientError::Server(format!("HTTP {status} {code}")),
