@@ -47,10 +47,13 @@ public static class W {
   }
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; public POINT(int x, int y) { X = x; Y = y; } }
+  // The edge window: the tallest visible window of the app (it spans the work area). The app
+  // also has the tray icon's tiny window and, on a first run, the app window with the tour.
   public static IntPtr Find(uint pid) {
-    IntPtr found = IntPtr.Zero;
+    IntPtr found = IntPtr.Zero; int best = 0;
     EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p);
-      if (p == pid && IsWindowVisible(h)) { found = h; return false; } return true; }, IntPtr.Zero);
+      RECT r; if (p == pid && IsWindowVisible(h) && GetWindowRect(h, out r) && r.B - r.T > best) { found = h; best = r.B - r.T; }
+      return true; }, IntPtr.Zero);
     return found;
   }
   public static IntPtr TopAt(int x, int y) { return GetAncestor(WindowFromPoint(new POINT(x, y)), 2); }
