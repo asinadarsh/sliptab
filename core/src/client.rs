@@ -498,8 +498,32 @@ mod upload_tests {
         std::thread::spawn(move || {
             for c in l.incoming().flatten() {
                 let mut c = c;
+                // Read the whole request (headers, then Content-Length bytes) before answering:
+                // Windows aborts a connection whose unread request data is discarded.
+                let mut req = Vec::new();
                 let mut buf = [0u8; 65536];
-                let _ = c.read(&mut buf);
+                let body_end = loop {
+                    let Ok(n) = c.read(&mut buf) else { break None };
+                    if n == 0 {
+                        break None;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    if let Some(h) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&req[..h]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break Some(h + 4 + len);
+                    }
+                };
+                while body_end.is_some_and(|e| req.len() < e) {
+                    match c.read(&mut buf) {
+                        Ok(n) if n > 0 => req.extend_from_slice(&buf[..n]),
+                        _ => break,
+                    }
+                }
                 let nth = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let reply = match first {
                     Some(f) if nth == 0 => f,
