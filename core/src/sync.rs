@@ -126,7 +126,7 @@ pub fn merge(base: Option<Base>, mine: &Note, theirs: &Note) -> Merged {
         mine
     };
     let mut note = newer.clone();
-    note.version = mine.version.max(theirs.version) + 1;
+    note.version = mine.version.max(theirs.version).saturating_add(1); // a hostile i64::MAX must not wrap
     let base_meta = base.and_then(|b| b.meta_hash);
     let meta_from = match (
         base_meta != Some(meta_hash(mine)),

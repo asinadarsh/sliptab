@@ -43,6 +43,22 @@ pub struct Note {
 /// Unknown fields from sync are kept, up to this many bytes of JSON per note and per link.
 pub const MAX_EXTRA_BYTES: usize = 16 * 1024;
 
+/// Longest note text, in bytes. The sync server refuses longer ones, so the store does too:
+/// a longer note would sit in the sync queue forever.
+pub const MAX_BODY_BYTES: usize = 200_000;
+
+/// `body` cut to [`MAX_BODY_BYTES`] at a character boundary.
+pub fn cap_body(body: &str) -> &str {
+    if body.len() <= MAX_BODY_BYTES {
+        return body;
+    }
+    let mut end = MAX_BODY_BYTES;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
+}
+
 impl Note {
     /// Drops unknown fields that are too big to be anything Edge wrote (from an untrusted device).
     pub fn cap_extra(&mut self) {

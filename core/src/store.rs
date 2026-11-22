@@ -112,6 +112,7 @@ impl Store {
     }
 
     pub fn create(&mut self, body: &str) -> rusqlite::Result<Note> {
+        let body = crate::cap_body(body);
         let now = now_ms();
         let note = Note {
             id: Uuid::now_v7(),
@@ -396,11 +397,15 @@ impl Store {
         self.edit(id, |n| change(n.link.as_mut().expect("checked above")))
     }
 
-    /// Replaces the body. Errors with `QueryReturnedNoRows` if the note does not exist.
+    /// Replaces the body (cut to [`crate::MAX_BODY_BYTES`]). Errors with `QueryReturnedNoRows` if
+    /// the note does not exist. Typing into a note deleted elsewhere brings it back: an edit beats
+    /// a delete, as in sync, so the text is never saved into an invisible note.
     pub fn update_body(&mut self, id: Uuid, body: &str) -> rusqlite::Result<Note> {
+        let body = crate::cap_body(body);
         self.edit(id, |n| {
             n.body = body.to_owned();
             n.title = derive_title(body);
+            n.deleted_at = None;
         })
     }
 
@@ -1002,6 +1007,18 @@ mod tests {
         let after = versions(&s);
         let edited: i64 = before.iter().zip(after).map(|(x, y)| y - x).sum();
         assert!(edited <= 3 + 3, "renumbering at most once");
+    }
+
+    #[test]
+    fn huge_notes_are_cut_and_typing_into_a_deleted_note_brings_it_back() {
+        let mut s = store();
+        let big = "é".repeat(crate::MAX_BODY_BYTES); // 2 bytes each: cut mid-way, on a boundary
+        let n = s.create(&big).unwrap();
+        assert!(n.body.len() <= crate::MAX_BODY_BYTES && n.body.len() > crate::MAX_BODY_BYTES - 2);
+        s.delete(n.id).unwrap();
+        let back = s.update_body(n.id, "still typing").unwrap();
+        assert!(back.deleted_at.is_none());
+        assert!(s.list().unwrap().iter().any(|x| x.id == n.id));
     }
 
     #[test]

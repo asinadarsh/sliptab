@@ -240,6 +240,7 @@ impl Client {
         // Bound first: a guard in the `for` header would stay locked for the whole loop, and
         // `mark_uploaded` below locks again (a deadlock that froze the app, 2026-11-22).
         let pending = lock(store).media_to_upload().map_err(local)?;
+        let mut failed = None;
         for sha in pending {
             let Ok(bytes) = std::fs::read(media_dir.join(&sha)) else {
                 continue; // attached on another device and not downloaded here
@@ -251,11 +252,25 @@ impl Client {
                 .header("x-edge-client", app_id())
                 .header("content-type", "application/octet-stream")
                 .send(&bytes[..]);
-            read::<serde::de::IgnoredAny>(resp)?;
-            lock(store).mark_uploaded(&sha).map_err(local)?;
-            done += 1;
+            // One file failing (quota full, a damaged local copy) must not hold back the others.
+            // Offline or signed out: stop, the rest would fail the same way.
+            match read::<serde::de::IgnoredAny>(resp) {
+                Ok(_) => {
+                    lock(store).mark_uploaded(&sha).map_err(local)?;
+                    done += 1;
+                }
+                Err(
+                    e @ (ClientError::Offline(_)
+                    | ClientError::SignedOut
+                    | ClientError::UpdateRequired(_)),
+                ) => return Err(e),
+                Err(e) => failed = Some(e),
+            }
         }
-        Ok(done)
+        match failed {
+            Some(e) if done == 0 => Err(e),
+            _ => Ok(done),
+        }
     }
 
     /// The local file for attachment `sha256`, downloading it first if this device lacks it.
@@ -468,8 +483,14 @@ mod upload_tests {
     use super::*;
     use std::io::{Read, Write};
 
-    /// A server that answers every request with 204, counting them.
+    /// A server that answers every request with 204 (or the first with `first`), counting them.
     fn tiny_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        server_with(None)
+    }
+
+    fn server_with(
+        first: Option<&'static str>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -479,10 +500,14 @@ mod upload_tests {
                 let mut c = c;
                 let mut buf = [0u8; 65536];
                 let _ = c.read(&mut buf);
-                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = c.write_all(
-                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
+                let nth = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let reply = match first {
+                    Some(f) if nth == 0 => f,
+                    _ => {
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                };
+                let _ = c.write_all(reply.as_bytes());
             }
         });
         (url, n)
@@ -516,6 +541,42 @@ mod upload_tests {
         assert!(
             lock(&st).media_to_upload().unwrap().is_empty(),
             "marked as sent"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_refused_file_does_not_hold_back_the_others() {
+        let dir = std::env::temp_dir().join(format!("edge-up2-{}", uuid::Uuid::now_v7()));
+        let mut s = Store::open_in_memory("phone").unwrap();
+        let n = s.create("Trip").unwrap();
+        for b in [&b"one"[..], b"two"] {
+            let (sha, len) = crate::attachment::store_file(&dir, b).unwrap();
+            let a = crate::attachment::new_attachment(
+                sha,
+                len,
+                "image/jpeg",
+                None,
+                None,
+                None,
+                None,
+                1,
+            )
+            .unwrap();
+            s.add_attachment(n.id, a).unwrap();
+        }
+        let store = Mutex::new(s);
+        let full = "HTTP/1.1 507 Insufficient Storage\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"error\":\"storage_full\"}";
+        let (url, _) = server_with(Some(full));
+        assert_eq!(
+            Client::new(&url).upload_media(&store, "t", &dir).unwrap(),
+            1,
+            "the second still went"
+        );
+        assert_eq!(
+            lock(&store).media_to_upload().unwrap().len(),
+            1,
+            "the refused one is retried later"
         );
         std::fs::remove_dir_all(dir).ok();
     }
