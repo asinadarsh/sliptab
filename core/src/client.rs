@@ -237,7 +237,10 @@ impl Client {
         media_dir: &std::path::Path,
     ) -> Result<usize> {
         let mut done = 0;
-        for sha in lock(store).media_to_upload().map_err(local)? {
+        // Bound first: a guard in the `for` header would stay locked for the whole loop, and
+        // `mark_uploaded` below locks again (a deadlock that froze the app, 2026-11-22).
+        let pending = lock(store).media_to_upload().map_err(local)?;
+        for sha in pending {
             let Ok(bytes) = std::fs::read(media_dir.join(&sha)) else {
                 continue; // attached on another device and not downloaded here
             };
@@ -458,4 +461,62 @@ fn read<T: serde::de::DeserializeOwned>(
         (502..=504, _) => ClientError::Offline(format!("HTTP {status}")),
         _ => ClientError::Server(format!("HTTP {status} {code}")),
     })
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A server that answers every request with 204, counting them.
+    fn tiny_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = n.clone();
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                let mut c = c;
+                let mut buf = [0u8; 65536];
+                let _ = c.read(&mut buf);
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = c.write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        (url, n)
+    }
+
+    #[test]
+    fn uploading_files_finishes_and_marks_them_sent() {
+        let dir = std::env::temp_dir().join(format!("edge-up-{}", uuid::Uuid::now_v7()));
+        let (sha, len) = crate::attachment::store_file(&dir, b"photo bytes").unwrap();
+        let mut s = Store::open_in_memory("phone").unwrap();
+        let n = s.create("Trip").unwrap();
+        let a =
+            crate::attachment::new_attachment(sha, len, "image/jpeg", None, None, None, None, 1)
+                .unwrap();
+        s.add_attachment(n.id, a).unwrap();
+        let store = Mutex::new(s);
+        let (url, hits) = tiny_server();
+        // Run on a thread with a deadline: a lock held across the loop used to hang here forever.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (st, d) = (std::sync::Arc::new(store), dir.clone());
+        let st2 = st.clone();
+        std::thread::spawn(move || {
+            tx.send(Client::new(&url).upload_media(&st2, "t", &d))
+                .unwrap()
+        });
+        let sent = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("upload_media hung (deadlock)");
+        assert_eq!(sent.unwrap(), 1);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            lock(&st).media_to_upload().unwrap().is_empty(),
+            "marked as sent"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
