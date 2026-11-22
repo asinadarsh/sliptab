@@ -32,7 +32,7 @@
 </script>
 
 {@render header()}
-<div class="list" use:pinDrag={onMovePin}>
+<div class="list notes-scroll" use:pinDrag={onMovePin}>
   {#each sections as s (s.name)}
     <div class="sec">{s.name}</div>
     {#each s.notes as n (n.id)}

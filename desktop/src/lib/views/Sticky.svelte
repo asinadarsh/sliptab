@@ -34,7 +34,7 @@
 </script>
 
 {@render header()}
-<div class="grid" use:pinDrag={onMovePin}>
+<div class="grid notes-scroll" use:pinDrag={onMovePin}>
   {#if !query}<div class="tile new">{@render capture("tile")}</div>{/if}
   {#each all as n (n.id)}
     {@const items = checklistItems(n)}

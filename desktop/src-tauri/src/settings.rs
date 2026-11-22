@@ -25,6 +25,32 @@ pub enum Layout {
     Sticky,
 }
 
+/// What AI agents connected through MCP (`sliptab mcp`) may do with the notes.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum McpAccess {
+    /// No access: every request is refused.
+    #[default]
+    Off,
+    /// List, search and read notes.
+    Read,
+    /// Also create, edit, pin and tick checklist items.
+    Write,
+    /// Also delete notes.
+    Full,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -45,6 +71,8 @@ pub struct Settings {
     pub bar_color: Option<String>,
     /// The first-run tour has been finished (or skipped).
     pub onboarded: bool,
+    /// AI agents' access through MCP. Off until the user turns it on.
+    pub mcp_access: McpAccess,
 }
 
 impl Default for Settings {
@@ -60,6 +88,7 @@ impl Default for Settings {
             layout: Layout::Cards,
             bar_color: None,
             onboarded: false,
+            mcp_access: McpAccess::Off,
         }
     }
 }

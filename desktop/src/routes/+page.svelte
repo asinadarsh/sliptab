@@ -11,6 +11,7 @@
   import Onboarding from "$lib/Onboarding.svelte";
   import RichEditor from "$lib/RichEditor.svelte";
   import Attachments from "$lib/Attachments.svelte";
+  import Agents from "$lib/Agents.svelte";
   import { plain } from "$lib/format";
   import "@fontsource-variable/figtree";
   import "@fontsource/instrument-serif/400.css";
@@ -28,6 +29,7 @@
     layout: Layout;
     barColor: string | null;
     onboarded: boolean;
+    mcpAccess: "off" | "read" | "write" | "full";
   };
   type HotkeyStatus = { accelerator: string; bound: string | null; portal: boolean; error: string | null };
 
@@ -37,6 +39,8 @@
   let notes: Note[] = $state([]); // what the list shows (search results while searching)
   let query = $state("");
   let tab: "notes" | "saved" = $state("notes");
+  /** The app window's Agents page (MCP access for AI agents). */
+  let agentsOpen = $state(false);
   let allSaves: Note[] = $state([]);
   let found: Note[] = $state([]); // saves matching the search
   let folders: [string, number][] = $state([]);
@@ -88,6 +92,7 @@
     layout: "cards",
     barColor: null,
     onboarded: true, // until loaded: never flash the tour at someone who finished it
+    mcpAccess: "off",
   });
   let cfgLoaded = $state(false);
   /** The app window (home.rs) shows the same panel as a normal window: no edge, no hover. */
@@ -159,6 +164,60 @@
   // DOM pointer events only count between a native enter and leave.
   let nativeCrossings = false;
   let nativeInside = false;
+  // The app's text menu (right-click in the editor, search or quick box).
+  let textMenu: { x: number; y: number; field: HTMLElement } | null = $state(null);
+  const inEditor = (f: HTMLElement) => f.isContentEditable;
+  async function clipWrite(text: string) {
+    try {
+      await invoke("clip_write", { text });
+    } catch {
+      await navigator.clipboard.writeText(text);
+    }
+  }
+  async function clipRead(): Promise<string> {
+    try {
+      return await invoke<string>("clip_read");
+    } catch {
+      return navigator.clipboard.readText();
+    }
+  }
+  function fieldSelection(f: HTMLElement): string {
+    if (inEditor(f)) return rich?.selection() ?? "";
+    const i = f as HTMLInputElement;
+    return i.value.slice(i.selectionStart ?? 0, i.selectionEnd ?? 0);
+  }
+  function fieldInsert(f: HTMLElement, text: string) {
+    if (inEditor(f)) return rich?.insert(text);
+    const i = f as HTMLInputElement;
+    i.focus();
+    i.setRangeText(text, i.selectionStart ?? i.value.length, i.selectionEnd ?? i.value.length, "end");
+    i.dispatchEvent(new Event("input", { bubbles: true })); // so bind:value sees it
+  }
+  async function textAction(kind: "cut" | "copy" | "paste" | "all") {
+    const f = textMenu?.field;
+    textMenu = null;
+    if (!f) return;
+    try {
+      if (kind === "all") {
+        if (inEditor(f)) rich?.selectAll();
+        else (f.focus(), (f as HTMLInputElement).select());
+      } else if (kind === "paste") {
+        fieldInsert(f, (await clipRead()).replace(/\r\n?/g, "\n"));
+      } else {
+        const text = fieldSelection(f);
+        if (!text) return;
+        await clipWrite(text);
+        if (kind === "cut") fieldInsert(f, "");
+      }
+    } catch (e) {
+      log(`text menu ${kind}: ${e}`);
+    }
+  }
+  /** Leaving the window closes the panel. */
+  function leave() {
+    edge.pointerLeave();
+  }
+
   function onNativeLeave() {
     nativeInside = false;
     if (heldLeave) clearTimeout(heldLeave);
@@ -172,12 +231,12 @@
       heldLeave = setTimeout(() => {
         heldLeave = null;
         setHover(null);
-        edge.pointerLeave();
+        leave();
       }, GRACE_MS);
       return;
     }
     setHover(null);
-    edge.pointerLeave();
+    leave();
   }
   function onNativeEnter() {
     nativeCrossings = nativeInside = true;
@@ -766,14 +825,22 @@
     // Text fields keep theirs, for cut, copy and paste.
     document.addEventListener("contextmenu", (e) => {
       const t = e.target as HTMLElement;
-      if (t.closest("input, textarea, [contenteditable='true']")) return; // cut, copy, paste
+      // Text: the app's own Cut / Copy / Paste menu. The system one was full of options nobody
+      // needs here, and as a separate window it closed the panel under it.
+      const field = t.closest<HTMLElement>("input, textarea, [contenteditable='true']");
+      if (field) {
+        e.preventDefault();
+        menu = null;
+        textMenu = { x: e.clientX, y: e.clientY, field };
+        return;
+      }
       e.preventDefault();
       const id = t.closest<HTMLElement>(".panel [data-id]")?.dataset.id;
       const n = id && [...all, ...allSaves].find((x) => x.id === id);
       menu = n ? { n, x: e.clientX, y: e.clientY } : null;
     });
     // Any click, key, scroll or leaving the window closes it.
-    const close = () => (menu = null);
+    const close = () => ((menu = null), (textMenu = null));
     document.addEventListener("pointerdown", (e) => {
       if (!(e.target as HTMLElement).closest(".attach-menu, [aria-label='Attach']")) attachMenu = false;
     });
@@ -799,7 +866,7 @@
     document.addEventListener("mouseout", (e) => {
       if (!e.relatedTarget && !standalone) {
         hoverTab = null;
-        edge.pointerLeave();
+        leave();
       }
     });
     window.addEventListener("blur", () => {
@@ -907,7 +974,7 @@
   onmouseleave={() => {
     if (standalone) return;
     hoverTab = null;
-    edge.pointerLeave();
+    leave();
   }}
   onmousemove={(e) => !standalone && domPointerAt(e.clientX, e.clientY, false)}
 >
@@ -992,16 +1059,19 @@
   {#if standalone}
     <nav class="rail" aria-label="Sections">
       <div class="logo" aria-hidden="true"><span></span></div>
-      <button class:on={!settingsOpen && tab === "notes"} onclick={() => { settingsOpen = false; editing = null; showTab("notes"); }} aria-label="Notes" title="Notes">
+      <button class:on={!settingsOpen && !agentsOpen && tab === "notes"} onclick={() => { settingsOpen = false; agentsOpen = false; editing = null; showTab("notes"); }} aria-label="Notes" title="Notes">
         <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 4h10l4 4v12H5z"/><path d="M14 4v5h5M8.5 13h7M8.5 16.5h5"/></svg>
       </button>
       {#if savesOn}
-      <button class:on={!settingsOpen && tab === "saved"} onclick={() => { settingsOpen = false; editing = null; showTab("saved"); }} aria-label="Saved" title="Saved">
+      <button class:on={!settingsOpen && !agentsOpen && tab === "saved"} onclick={() => { settingsOpen = false; agentsOpen = false; editing = null; showTab("saved"); }} aria-label="Saved" title="Saved">
         <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 4h11v16l-5.5-4-5.5 4z"/></svg>
       </button>
       {/if}
+      <button class:on={agentsOpen && !settingsOpen} onclick={() => { settingsOpen = false; editing = null; agentsOpen = true; }} aria-label="AI agents" title="AI agents (MCP)">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M18.5 14.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>
+      </button>
       <span class="grow"></span>
-      <button class:on={settingsOpen} onclick={openSettings} aria-label="Settings" title="Settings">
+      <button class:on={settingsOpen} onclick={() => { agentsOpen = false; openSettings(); }} aria-label="Settings" title="Settings">
         <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
       </button>
     </nav>
@@ -1025,7 +1095,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="panel" class:shown style:--open-ms="{OPEN_MS}ms" style:--close-ms="{CLOSE_MS}ms" onpointerdown={claimFocus}>
 
-    {#if settingsOpen}
+    {#if agentsOpen && !settingsOpen && standalone}
+      <Agents access={cfg.mcpAccess} onaccess={(a) => saveSettings({ mcpAccess: a })} />
+    {:else if settingsOpen}
       <header class="top">
         <button class="ib" onclick={() => (settingsOpen = false)} aria-label="Back to notes"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
         <h1 class="grow">Settings</h1>
@@ -1122,6 +1194,16 @@
           <input type="checkbox" checked={cfg.showBar} onchange={(e) => saveSettings({ showBar: e.currentTarget.checked })} aria-label="Show the bar" />
         </section>
 
+        <div class="group">AI agents</div>
+        <section class="setting">
+          <div class="grow"><div>Agent access</div><div class="sub">Set up in the Sliptab window → AI agents.</div></div>
+          <select value={cfg.mcpAccess} onchange={(e) => saveSettings({ mcpAccess: e.currentTarget.value as Settings["mcpAccess"] })} aria-label="Agent access">
+            <option value="off">Off</option>
+            <option value="read">Read</option>
+            <option value="write">Read & write</option>
+            <option value="full">Full access</option>
+          </select>
+        </section>
         <div class="group">General</div>
         <section class="setting">
           <div class="grow"><div>Open hotkey</div><div class="sub">Opens this panel from any app, ready to type.</div></div>
@@ -1241,6 +1323,26 @@
           <button class="go" class:danger={asking.ok.startsWith("Delete")} autofocus={asking.input === null} onclick={() => answer(asking!.input ?? "")}>{asking.ok}</button>
         </div>
       </div>
+    </div>
+  {/if}
+
+  {#if textMenu}
+    {@const f = textMenu.field}
+    {@const has = !!fieldSelection(f)}
+    <!-- mousedown is cancelled so the field keeps its focus and selection for Cut / Copy. -->
+    <div class="ctx" role="menu" tabindex="-1" onmousedown={(e) => e.preventDefault()} style:left="min({textMenu.x}px, calc(100vw - 210px))" style:top="min({textMenu.y}px, calc(100vh - 330px))">
+      <button role="menuitem" disabled={!has} onclick={() => textAction("cut")}>Cut <kbd>Ctrl X</kbd></button>
+      <button role="menuitem" disabled={!has} onclick={() => textAction("copy")}>Copy <kbd>Ctrl C</kbd></button>
+      <button role="menuitem" onclick={() => textAction("paste")}>Paste <kbd>Ctrl V</kbd></button>
+      <button role="menuitem" onclick={() => textAction("all")}>Select all <kbd>Ctrl A</kbd></button>
+      {#if inEditor(f)}
+        <hr />
+        <button role="menuitem" onclick={() => { textMenu = null; rich?.bold(); }}>Bold <kbd>Ctrl B</kbd></button>
+        <button role="menuitem" onclick={() => { textMenu = null; rich?.italic(); }}>Italic <kbd>Ctrl I</kbd></button>
+        <button role="menuitem" onclick={() => { textMenu = null; rich?.underline(); }}>Underline <kbd>Ctrl U</kbd></button>
+        <button role="menuitem" onclick={() => { textMenu = null; rich?.strike(); }}>Strikethrough</button>
+        <button role="menuitem" onclick={() => { textMenu = null; rich?.checklist(); }}>Checklist</button>
+      {/if}
     </div>
   {/if}
 
@@ -1429,6 +1531,18 @@
   .ctx button:focus-visible {
     background: var(--surface-2);
   }
+  .ctx button:disabled {
+    color: var(--faint);
+    cursor: default;
+    background: none;
+  }
+  .ctx kbd {
+    float: right;
+    margin-left: 18px;
+    font: inherit;
+    font-size: 11.5px;
+    color: var(--faint);
+  }
   .ctx .danger {
     color: #e5484d;
   }
@@ -1522,6 +1636,42 @@
   }
   /* An app, not a page: lists, cards and labels are not selectable text (a press-and-drag
      selected words); the editor, fields and previews still are. */
+  /* No scrollbars anywhere (they looked heavy on GNOME); lists still scroll by wheel, trackpad
+     and keys. */
+  :global(*) {
+    scrollbar-width: none;
+  }
+  :global(*::-webkit-scrollbar) {
+    display: none;
+  }
+  /* The notes list keeps one: a hairline thumb with no track, so a long list shows how much
+     there is. It darkens while the pointer is over the list. */
+  :global(.notes-scroll) {
+    /* The bar sits in a gutter outside the cards (the cards keep their width, lined up with the
+       box above), so it never draws over them. */
+    margin-right: -16px !important;
+    padding-right: 6px !important; /* + the 10px bar = 16px */
+    scrollbar-gutter: stable; /* the same room with or without a bar */
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--text) 14%, transparent) transparent;
+  }
+  :global(.notes-scroll::-webkit-scrollbar) {
+    display: block;
+    width: 10px;
+  }
+  :global(.notes-scroll::-webkit-scrollbar-track) {
+    background: transparent;
+  }
+  :global(.notes-scroll::-webkit-scrollbar-thumb) {
+    border-radius: 99px;
+    border: 3.5px solid transparent;
+    background-clip: padding-box;
+    background-color: color-mix(in srgb, var(--text) 12%, transparent);
+    min-height: 40px;
+  }
+  :global(.notes-scroll:hover::-webkit-scrollbar-thumb) {
+    background-color: color-mix(in srgb, var(--text) 26%, transparent);
+  }
   main {
     user-select: none;
     -webkit-user-select: none;

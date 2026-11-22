@@ -2,6 +2,7 @@ mod edge;
 mod google;
 mod home;
 mod hotkey;
+pub mod mcp;
 mod settings;
 mod sync;
 #[cfg(desktop)]
@@ -120,6 +121,44 @@ fn pins_unseen(s: State<Notes>) -> CmdResult<Vec<Uuid>> {
 #[tauri::command]
 fn pin_seen(s: State<Notes>, id: Uuid) -> CmdResult<()> {
     with_store(&s, |st| st.mark_pin_seen(id))
+}
+
+/// How agents start the MCP server: this program with the argument `mcp`, plus the last use.
+#[tauri::command]
+fn mcp_info(app: tauri::AppHandle) -> CmdResult<serde_json::Value> {
+    let exe = std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .map_or_else(std::env::current_exe, Ok)
+        .map_err(|e| e.to_string())?;
+    let last = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|d| std::fs::read_to_string(d.join(mcp::LAST_USE)).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    Ok(serde_json::json!({ "command": exe.to_string_lossy(), "last": last }))
+}
+
+/// Notes changed by another process (the MCP server an agent runs): reload the lists and sync.
+fn watch_other_writers(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let version = || {
+            app.state::<Notes>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|s| s.data_version().ok())
+        };
+        let mut last = version();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let now = version();
+            if now != last {
+                last = now;
+                app.state::<SyncState>().kick(false);
+            }
+        }
+    });
 }
 
 /// Removes notes left empty here, except the one open in the editor (`keep`).
@@ -548,6 +587,7 @@ pub fn run() {
             let store = Store::open(dir.join("notes.db"), device_id(&dir)?)?;
             app.manage(Notes(Mutex::new(store)));
             sync::start(app.handle(), &dir);
+            watch_other_writers(app.handle().clone());
             let loaded = settings::load(&dir);
             if let Err(e) = hotkey::apply(app.handle(), &loaded.hotkey, None) {
                 eprintln!("hotkey: {e}"); // shown in settings via get_hotkey's error
@@ -627,11 +667,16 @@ pub fn run() {
             note_attach,
             note_move_pin,
             notes_clean,
+            mcp_info,
             pins_unseen,
             pin_seen,
             note_detach,
             sync::media_get,
             sync::media_open,
+            sync::media_save,
+            sync::media_copy_image,
+            sync::clip_read,
+            sync::clip_write,
             saves_list,
             saves_search,
             save_folders,

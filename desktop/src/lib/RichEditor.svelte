@@ -158,6 +158,21 @@
   export function italic() { apply("*"); }
   export function underline() { apply("__"); }
   export function strike() { apply("~~"); }
+  // For the app's own right-click menu.
+  export function selection(): string {
+    const at = caret();
+    return at ? value.slice(at.start, at.end) : "";
+  }
+  /** Replaces the selection (or inserts at the caret). */
+  export function insert(s: string) {
+    el?.focus();
+    insertText(s);
+  }
+  export function selectAll() {
+    el?.focus();
+    setCaret(0, value.length);
+  }
+
   /** A click below the text: caret to the end, ready to type. */
   export function focusEnd() {
     el?.focus();

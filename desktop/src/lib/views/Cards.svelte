@@ -33,7 +33,7 @@
 
 {@render header()}
 {@render capture("big")}
-<div class="scroll">
+<div class="scroll notes-scroll">
   {#each sections as s (s.name)}
     <div class="sec">{s.name}</div>
     {#if s.name === "Pinned"}

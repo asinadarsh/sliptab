@@ -98,6 +98,9 @@ impl Store {
 
     fn init(conn: Connection, device_id: String) -> rusqlite::Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        // The app and the MCP server for AI agents can write at the same moment: wait for the
+        // other one instead of failing with "database is locked".
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let done: usize = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(done) {
             let tx = conn.unchecked_transaction()?;
@@ -399,6 +402,13 @@ impl Store {
             n.body = body.to_owned();
             n.title = derive_title(body);
         })
+    }
+
+    /// Changes whenever another connection (another process, e.g. the MCP server for AI agents)
+    /// writes to this database. Poll it to notice those writes.
+    pub fn data_version(&self) -> rusqlite::Result<i64> {
+        self.conn
+            .pragma_query_value(None, "data_version", |r| r.get(0))
     }
 
     /// Pinned notes this device has not shown yet: pinned on another device since. Oldest first.

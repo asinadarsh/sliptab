@@ -335,6 +335,114 @@ pub async fn media_get(app: AppHandle, sha256: String) -> CmdResult<tauri::ipc::
     .await
 }
 
+/// The local path of attachment `sha256`, downloading it first when this device lacks it.
+fn local_media(app: &AppHandle, sha256: &str) -> CmdResult<PathBuf> {
+    let st = app.state::<SyncState>();
+    let dir = st.media_dir();
+    if sha256.len() == 64
+        && sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        && dir.join(sha256).exists()
+    {
+        return Ok(dir.join(sha256));
+    }
+    let account = st
+        .account()
+        .ok_or("Sign in to sync to see this file here.")?;
+    Client::new(SERVER)
+        .media_file(&account.token, &dir, sha256)
+        .map_err(|e| e.to_string())
+}
+
+/// Saves a copy of an attachment in the Downloads folder under its own name ("photo (2).jpg"
+/// when that name is taken). Returns where it went.
+#[tauri::command]
+pub async fn media_save(app: AppHandle, sha256: String, name: String) -> CmdResult<String> {
+    blocking(move || {
+        let src = local_media(&app, &sha256)?;
+        let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let name = safe_name(&name);
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() => (s.to_owned(), format!(".{e}")),
+            _ => (name.clone(), String::new()),
+        };
+        let mut dst = dir.join(&name);
+        for i in 2.. {
+            if !dst.exists() {
+                break;
+            }
+            dst = dir.join(format!("{stem} ({i}){ext}"));
+        }
+        std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+        Ok(dst.to_string_lossy().into_owned())
+    })
+    .await
+}
+
+/// Text on the clipboard, for the app's own Paste (WebKitGTK does not let the page read it).
+#[tauri::command]
+pub async fn clip_read(app: AppHandle) -> CmdResult<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let text = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).wait_for_text();
+            let _ = tx.send(text.map(|t| t.to_string()).unwrap_or_default());
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Err("use the page clipboard".into())
+    }
+}
+
+/// Puts text on the clipboard, for the app's own Cut and Copy.
+#[tauri::command]
+pub async fn clip_write(app: AppHandle, text: String) -> CmdResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        app.run_on_main_thread(move || {
+            gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(&text)
+        })
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, text);
+        Err("use the page clipboard".into())
+    }
+}
+
+/// Puts an image attachment on the clipboard (Linux: GTK's clipboard, as the page's own
+/// clipboard API cannot write images in WebKitGTK).
+#[tauri::command]
+pub async fn media_copy_image(app: AppHandle, sha256: String) -> CmdResult<()> {
+    let path = {
+        let app = app.clone();
+        blocking(move || local_media(&app, &sha256)).await?
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let r = gtk::gdk_pixbuf::Pixbuf::from_file(&path).map(|p| {
+                gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_image(&p);
+            });
+            let _ = tx.send(r.map_err(|e| e.to_string()));
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, path);
+        Err("Copying images is not available here yet; use Save to Downloads.".into())
+    }
+}
+
 /// Opens a file attachment (a PDF, a document) in its app: a copy under its own name in the
 /// cache, so the app shows a sensible title. Files that could run code are not opened.
 #[tauri::command]
