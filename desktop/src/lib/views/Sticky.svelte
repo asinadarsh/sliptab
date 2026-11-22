@@ -1,7 +1,8 @@
 <!-- C · Sticky notes: tiles in a grid, pinned ones tinted with their tab colour. -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { ago, checklistItems, preview, type Note, type Section } from "$lib/notes";
+  import { pinDrag } from "$lib/pindrag";
+  import { attachSummary, ago, checklistItems, preview, type Note, type Section } from "$lib/notes";
 
   let {
     sections,
@@ -9,6 +10,8 @@
     query,
     onOpen,
     onPin,
+    onMovePin,
+    unseen = new Set(),
     onHover,
     header,
     capture,
@@ -18,6 +21,10 @@
     query: string;
     onOpen: (n: Note) => void;
     onPin: (n: Note) => void;
+    /** Drag a pinned note: its tab goes before `before` (null: last). */
+    onMovePin: (id: string, before: string | null) => void;
+    /** Pinned on another device and not opened here yet. */
+    unseen?: Set<string>;
     onHover: (n: Note) => void;
     header: Snippet;
     capture: Snippet<["big" | "slim" | "tile"]>;
@@ -27,12 +34,12 @@
 </script>
 
 {@render header()}
-<div class="grid">
+<div class="grid" use:pinDrag={onMovePin}>
   {#if !query}<div class="tile new">{@render capture("tile")}</div>{/if}
   {#each all as n (n.id)}
     {@const items = checklistItems(n)}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="tile" class:pinned={n.pinned} class:sel={n.id === selectedId} data-id={n.id}
+    <div class="tile" class:fresh={unseen.has(n.id)} class:pinned={n.pinned} class:sel={n.id === selectedId} data-id={n.id} data-pin={n.pinned ? n.id : undefined}
       style:--c={n.color ?? "var(--faint)"} onclick={() => onOpen(n)} onmouseenter={() => onHover(n)}>
       <div class="tt">
         <button class="pinm" class:on={n.pinned} aria-label={n.pinned ? "Unpin" : "Pin"} title={n.pinned ? "Unpin" : "Pin to the edge"}
@@ -42,7 +49,7 @@
         {#each items.slice(0, 4) as it}<div class="ci" class:done={it.done}>{it.done ? "☑" : "☐"} {it.text}</div>{/each}
         {#if items.length > 4}<div class="ci more">+{items.length - 4} more</div>{/if}
       {:else}
-        <div class="tp">{preview(n)}</div>
+        <div class="tp">{preview(n) || attachSummary(n)}</div>
       {/if}
       <div class="tm">{ago(n.updated_at)}</div>
     </div>
@@ -71,4 +78,5 @@
   .new { border: 2px dashed var(--line); background: transparent; box-shadow: none; padding: 8px; cursor: text;
     display: flex; transform: none !important; }
   .empty { grid-column: 1 / -1; color: var(--faint); padding: 24px; text-align: center; }
+  .tile.fresh { box-shadow: 0 0 0 1.5px var(--c), 0 0 22px -2px var(--c); }
 </style>

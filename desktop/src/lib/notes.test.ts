@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checklistItems, edgeTabs, isOnlyLink, nextColor, PALETTE, preview, progress, saveTitle, sections, type Note } from "./notes.ts";
+import { attachSummary, checklistItems, edgeTabs, isOnlyLink, nextColor, PALETTE, preview, progress, saveTitle, sections, type Note } from "./notes.ts";
 
 let t = 0;
 const note = (body: string, extra: Partial<Note> = {}): Note => ({
@@ -69,4 +69,17 @@ test("only a bare link is saved as a post", () => {
   assert.ok(isOnlyLink("  https://x.com/jack/status/20 "));
   assert.ok(!isOnlyLink("call Ravi about https://x.com/jack/status/20"));
   assert.ok(!isOnlyLink("x.com/jack"));
+});
+
+test("attachment summary counts live images and recordings", () => {
+  const a = (kind: "image" | "audio" | "file", deleted_at: number | null = null) => ({ id: "x", kind, mime: `${kind}/x`, bytes: 1, sha256: "s", created_at: 1, deleted_at });
+  assert.equal(attachSummary(note("t")), "");
+  assert.equal(attachSummary({ ...note("t"), attachments: [a("image"), a("image"), a("audio"), a("audio", 5)] }), "2 images · 1 audio");
+  assert.equal(attachSummary({ ...note("t"), attachments: [a("file"), a("file")] }), "2 files");
+});
+
+test("pinned tabs follow pin order, older notes by creation", () => {
+  const n = (id: string, created_at: number, pin_order: number | null) => ({ ...note(id), id, pinned: true, created_at, pin_order });
+  const { tabs } = edgeTabs([n("late", 5, 300), n("old", 1, null), n("first", 9, 100)]);
+  assert.deepEqual(tabs.map((t) => t.id), ["old", "first", "late"]);
 });

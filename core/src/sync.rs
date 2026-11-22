@@ -85,6 +85,9 @@ pub fn meta_hash(n: &Note) -> u64 {
     if let Some(l) = &n.link {
         s += &format!("|{}|{}", l.folder.as_deref().unwrap_or(""), l.done);
     }
+    if let Some(o) = n.pin_order {
+        s += &format!("|o{o}"); // absent: hashes exactly as before tabs could be ordered
+    }
     body_hash(&s)
 }
 
@@ -133,11 +136,13 @@ pub fn merge(base: Option<Base>, mine: &Note, theirs: &Note) -> Merged {
         (false, true) => theirs,
         _ => newer,
     };
-    (note.pinned, note.archived, note.color) = (
+    (note.pinned, note.archived, note.color, note.pin_order) = (
         meta_from.pinned,
         meta_from.archived,
         meta_from.color.clone(),
+        meta_from.pin_order,
     );
+    note.attachments = crate::attachment::merge(&mine.attachments, &theirs.attachments);
     note.link = merge_link(
         mine.link.as_ref(),
         theirs.link.as_ref(),
@@ -205,6 +210,8 @@ fn same_content(a: &Note, b: &Note) -> bool {
         a.deleted_at.is_some(),
         &a.color,
         &a.link,
+        &a.attachments,
+        a.pin_order,
     ) == (
         &b.body,
         b.pinned,
@@ -212,6 +219,8 @@ fn same_content(a: &Note, b: &Note) -> bool {
         b.deleted_at.is_some(),
         &b.color,
         &b.link,
+        &b.attachments,
+        b.pin_order,
     )
 }
 
@@ -223,6 +232,7 @@ fn conflict_copy(loser: &Note, of: Uuid) -> Note {
         deleted_at: None,
         version: 1,
         conflict_of: Some(of),
+        attachments: Vec::new(), // already on the merged note
         ..loser.clone()
     }
 }
@@ -247,6 +257,8 @@ mod tests {
             color: None,
             link: None,
             extra: Default::default(),
+            attachments: Vec::new(),
+            pin_order: None,
         }
     }
 

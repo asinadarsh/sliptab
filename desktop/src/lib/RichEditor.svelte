@@ -9,11 +9,14 @@
     value = $bindable(""),
     oninput,
     onopenlink,
+    onfiles,
     el = $bindable(),
   }: {
     value: string;
     oninput?: () => void;
     onopenlink?: (href: string) => void;
+    /** Images or audio pasted or dropped into the editor. */
+    onfiles?: (files: File[]) => void;
     el?: HTMLDivElement;
   } = $props();
 
@@ -155,6 +158,12 @@
   export function italic() { apply("*"); }
   export function underline() { apply("__"); }
   export function strike() { apply("~~"); }
+  /** A click below the text: caret to the end, ready to type. */
+  export function focusEnd() {
+    el?.focus();
+    setCaret(value.length);
+    markCurrentLine();
+  }
   export function checklist() {
     const at = caret() ?? { start: value.length, end: value.length };
     const r = toggleItemLine(value, at.start);
@@ -225,6 +234,8 @@
 
   function onPaste(e: ClipboardEvent) {
     e.preventDefault();
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (files.length && onfiles) return onfiles(files);
     insertText((e.clipboardData?.getData("text/plain") ?? "").replace(/\r\n?/g, "\n"));
   }
 
@@ -260,6 +271,14 @@
   oninput={onInput}
   onkeydown={onKeydown}
   onpaste={onPaste}
+  ondragover={(e) => e.dataTransfer?.types.includes("Files") && e.preventDefault()}
+  ondrop={(e) => {
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length && onfiles) {
+      e.preventDefault();
+      onfiles(files);
+    }
+  }}
   onclick={onClick}
   onmousedown={onMousedown}
   oncompositionstart={() => (composing = true)}

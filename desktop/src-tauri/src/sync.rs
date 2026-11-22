@@ -59,6 +59,11 @@ impl SyncState {
         }
     }
 
+    /// Attachment files, named by their SHA-256.
+    pub fn media_dir(&self) -> PathBuf {
+        self.dir.join("media")
+    }
+
     fn account_path(&self) -> PathBuf {
         self.dir.join("account.json")
     }
@@ -136,7 +141,13 @@ fn run(app: &AppHandle) {
         let _ = app.emit(SAVES_EVENT, ());
     }
     let Some(account) = st.account() else { return };
-    let result = Client::new(SERVER).sync(&notes.0, &account.token);
+    let client = Client::new(SERVER);
+    // Files first, so another device can open an attachment as soon as its note arrives. A
+    // failed upload is retried next time; the notes sync either way.
+    if let Err(e) = client.upload_media(&notes.0, &account.token, &st.media_dir()) {
+        eprintln!("media upload: {e}");
+    }
+    let result = client.sync(&notes.0, &account.token);
     let mut status = st.status.lock().unwrap_or_else(|e| e.into_inner()).clone();
     status.received = 0;
     match result {
@@ -297,6 +308,135 @@ pub async fn sync_delete_account(app: AppHandle) -> CmdResult<Status> {
     let _ = std::fs::remove_file(st.account_path());
     *st.status.lock().map_err(|e| e.to_string())? = Status::default();
     Ok(Status::default())
+}
+
+/// The bytes of attachment `sha256`, downloaded from the server first when this device lacks
+/// them (attached on another device). Raw bytes, not JSON, so a 50 MB file is not inflated.
+#[tauri::command]
+pub async fn media_get(app: AppHandle, sha256: String) -> CmdResult<tauri::ipc::Response> {
+    blocking(move || {
+        let st = app.state::<SyncState>();
+        let dir = st.media_dir();
+        let local = dir.join(&sha256);
+        let path = if local.exists() && sha256.len() == 64 {
+            local
+        } else {
+            let account = st
+                .account()
+                .ok_or("Sign in to sync to see this file here.")?;
+            Client::new(SERVER)
+                .media_file(&account.token, &dir, &sha256)
+                .map_err(|e| e.to_string())?
+        };
+        std::fs::read(path)
+            .map(tauri::ipc::Response::new)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Opens a file attachment (a PDF, a document) in its app: a copy under its own name in the
+/// cache, so the app shows a sensible title. Files that could run code are not opened.
+#[tauri::command]
+pub async fn media_open(app: AppHandle, sha256: String, name: String) -> CmdResult<()> {
+    blocking(move || {
+        let st = app.state::<SyncState>();
+        let dir = st.media_dir();
+        let src = if dir.join(&sha256).exists() && sha256.len() == 64 {
+            dir.join(&sha256)
+        } else {
+            let account = st
+                .account()
+                .ok_or("Sign in to sync to see this file here.")?;
+            Client::new(SERVER)
+                .media_file(&account.token, &dir, &sha256)
+                .map_err(|e| e.to_string())?
+        };
+        let name = safe_name(&name);
+        if runnable(&name) {
+            return Err(
+                "This kind of file could run a program, so Sliptab does not open it.".into(),
+            );
+        }
+        let out = app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| e.to_string())?
+            .join("open")
+            .join(&sha256[..12]);
+        std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+        let dst = out.join(&name);
+        std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+        crate::google::open_browser(&dst.to_string_lossy())
+    })
+    .await
+}
+
+/// The last path part only, without characters a file system refuses.
+fn safe_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c))
+        .take(120)
+        .collect();
+    let clean = clean.trim().trim_start_matches('.').to_owned();
+    if clean.is_empty() {
+        "file".into()
+    } else {
+        clean
+    }
+}
+
+/// Extensions that run code when opened (Linux launchers, Windows programs and scripts).
+fn runnable(name: &str) -> bool {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "desktop"
+            | "sh"
+            | "bash"
+            | "run"
+            | "bin"
+            | "appimage"
+            | "deb"
+            | "rpm"
+            | "py"
+            | "pl"
+            | "jar"
+            | "exe"
+            | "msi"
+            | "bat"
+            | "cmd"
+            | "com"
+            | "scr"
+            | "ps1"
+            | "vbs"
+            | "vbe"
+            | "js"
+            | "jse"
+            | "wsf"
+            | "lnk"
+            | "hta"
+            | "cpl"
+            | "reg"
+            | "pif"
+            | "app"
+            | "command"
+    )
+}
+
+#[test]
+fn opened_files_get_safe_names_and_programs_are_refused() {
+    assert_eq!(safe_name("../../etc/passwd"), "passwd");
+    assert_eq!(safe_name("C:\\x\\Report: Q3?.pdf"), "Report Q3.pdf");
+    assert_eq!(safe_name(".bashrc"), "bashrc");
+    assert_eq!(safe_name(""), "file");
+    assert!(runnable("setup.EXE") && runnable("x.desktop") && runnable("a.sh"));
+    assert!(!runnable("notes.pdf") && !runnable("song.mp3") && !runnable("README"));
 }
 
 #[tauri::command]

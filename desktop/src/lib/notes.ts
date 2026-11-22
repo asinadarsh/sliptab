@@ -9,9 +9,30 @@ export type Note = {
   created_at: number;
   updated_at: number;
   color: string | null;
+  /** Place of a pinned note's tab, smallest first; absent in older notes. */
+  pin_order?: number | null;
   /** Present when the note is a saved post. */
   link?: Link;
+  /** Images and recordings, removed ones included (deleted_at set). */
+  attachments?: Attachment[];
 };
+
+export type Attachment = {
+  id: string;
+  kind: "image" | "audio" | "file";
+  mime: string;
+  bytes: number;
+  sha256: string;
+  name?: string | null;
+  width?: number | null;
+  height?: number | null;
+  duration_ms?: number | null;
+  created_at: number;
+  deleted_at?: number | null;
+};
+
+/** Attachments still on the note. */
+export const liveAttachments = (n: Note) => (n.attachments ?? []).filter((a) => !a.deleted_at);
 
 export type Link = {
   url: string;
@@ -71,8 +92,14 @@ export function nextColor(notes: Note[]): string {
 
 /** Six note tabs at most; more pins collapse into one "+N" tab. Ordered by creation so tabs never jump. */
 export const MAX_NOTE_TABS = 6;
+
+/** Pinned notes in their tab order (as pinned, or as dragged); older notes by when they were made. */
+export function byPinOrder(pinned: Note[]): Note[] {
+  const key = (n: Note) => n.pin_order ?? n.created_at;
+  return [...pinned].sort((a, b) => key(a) - key(b) || a.created_at - b.created_at);
+}
 export function edgeTabs(notes: Note[]): { tabs: Note[]; more: number } {
-  const pinned = notes.filter((n) => n.pinned).sort((a, b) => a.created_at - b.created_at);
+  const pinned = byPinOrder(notes.filter((n) => n.pinned));
   return { tabs: pinned.slice(0, MAX_NOTE_TABS), more: Math.max(0, pinned.length - MAX_NOTE_TABS) };
 }
 
@@ -110,7 +137,7 @@ export function sections(notes: Note[], searching: boolean, now = Date.now()): S
   const midnight = new Date(now);
   midnight.setHours(0, 0, 0, 0);
   const out: Section[] = [
-    { name: "Pinned", notes: notes.filter((n) => n.pinned) },
+    { name: "Pinned", notes: byPinOrder(notes.filter((n) => n.pinned)) },
     { name: "Today", notes: notes.filter((n) => !n.pinned && n.updated_at >= midnight.getTime()) },
     { name: "Earlier", notes: notes.filter((n) => !n.pinned && n.updated_at < midnight.getTime()) },
   ];
@@ -125,4 +152,12 @@ export function ago(ms: number, now = Date.now()): string {
   if (s < 2 * 86400) return "Yesterday";
   if (s < 7 * 86400) return new Date(ms).toLocaleDateString(undefined, { weekday: "short" });
   return new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
+
+/** "2 images · 1 audio · 3 files", or "" when the note has none. */
+export function attachSummary(n: Note): string {
+  const live = liveAttachments(n);
+  const count = (k: string) => live.filter((a) => a.kind === k).length;
+  const [i, v, f] = [count("image"), count("audio"), count("file")];
+  return [i && `${i} image${i > 1 ? "s" : ""}`, v && `${v} audio`, f && `${f} file${f > 1 ? "s" : ""}`].filter(Boolean).join(" · ");
 }

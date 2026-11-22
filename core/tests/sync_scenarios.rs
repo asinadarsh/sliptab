@@ -297,3 +297,104 @@ fn oversized_unknown_fields_from_a_device_are_dropped() {
     n.cap_extra();
     assert!(n.extra.is_empty());
 }
+
+fn photo(n: u8) -> notes_core::Attachment {
+    notes_core::Attachment {
+        id: Uuid::now_v7(),
+        kind: "image".into(),
+        mime: "image/jpeg".into(),
+        bytes: 1000,
+        sha256: format!("{:064x}", n),
+        name: None,
+        width: Some(10),
+        height: Some(10),
+        duration_ms: None,
+        created_at: n as i64,
+        deleted_at: None,
+    }
+}
+
+fn live(s: &Store, id: Uuid) -> Vec<String> {
+    let n = s.get(id).unwrap().unwrap();
+    n.attachments
+        .iter()
+        .filter(|a| a.is_live())
+        .map(|a| a.sha256.clone())
+        .collect()
+}
+
+#[test]
+fn photos_added_offline_on_both_devices_both_arrive_and_text_edits_merge() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let n = phone.create("Trip").unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    phone.add_attachment(n.id, photo(1)).unwrap();
+    laptop.add_attachment(n.id, photo(2)).unwrap();
+    laptop.update_body(n.id, "Trip to Goa").unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    for d in [&phone, &laptop] {
+        assert_eq!(
+            live(d, n.id),
+            [format!("{:064x}", 1), format!("{:064x}", 2)]
+        );
+        assert_eq!(d.list().unwrap().len(), 1, "no conflict copy");
+        assert_eq!(d.get(n.id).unwrap().unwrap().body, "Trip to Goa");
+    }
+}
+
+#[test]
+fn removing_a_photo_on_one_device_removes_it_everywhere() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let n = phone.create("Trip").unwrap();
+    let a = photo(1);
+    phone.add_attachment(n.id, a.clone()).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    laptop.remove_attachment(n.id, a.id).unwrap();
+    phone.add_attachment(n.id, photo(2)).unwrap(); // meanwhile, offline
+    settle(&mut phone, &mut laptop, &mut server);
+    assert_eq!(live(&phone, n.id), [format!("{:064x}", 2)]);
+    assert_eq!(live(&laptop, n.id), [format!("{:064x}", 2)]);
+}
+
+#[test]
+fn a_tab_dragged_on_the_laptop_moves_on_the_phone_too() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let a = phone.create("a").unwrap().id;
+    let b = phone.create("b").unwrap().id;
+    phone.set_pinned(a, true).unwrap();
+    phone.set_pinned(b, true).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    laptop.move_pin(a, Some(b)).unwrap(); // b was pinned last, so on top; drag a above it
+    phone.update_body(a, "a, edited").unwrap(); // meanwhile, offline
+    settle(&mut phone, &mut laptop, &mut server);
+    let order = |s: &Store| {
+        let mut p: Vec<_> = s.list().unwrap().into_iter().filter(|n| n.pinned).collect();
+        p.sort_by_key(|n| n.pin_order);
+        p.into_iter().map(|n| n.body).collect::<Vec<_>>()
+    };
+    assert_eq!(order(&phone), ["a, edited", "b"]);
+    assert_eq!(order(&laptop), ["a, edited", "b"]);
+}
+
+#[test]
+fn a_note_pinned_on_the_phone_is_new_on_the_laptop_until_seen() {
+    let (mut phone, mut laptop, mut server) = devices();
+    let n = phone.create("Call the bank").unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    assert!(laptop.unseen_pins().unwrap().is_empty());
+    phone.set_pinned(n.id, true).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    assert_eq!(laptop.unseen_pins().unwrap(), [n.id], "new on the laptop");
+    assert!(
+        phone.unseen_pins().unwrap().is_empty(),
+        "not on the phone that pinned it"
+    );
+    laptop.mark_pin_seen(n.id).unwrap();
+    assert!(laptop.unseen_pins().unwrap().is_empty());
+    // Unpinned and pinned again on the phone: new again.
+    phone.set_pinned(n.id, false).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    phone.set_pinned(n.id, true).unwrap();
+    settle(&mut phone, &mut laptop, &mut server);
+    assert_eq!(laptop.unseen_pins().unwrap(), [n.id]);
+}

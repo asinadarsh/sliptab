@@ -59,11 +59,27 @@ ALTER TABLE notes ADD COLUMN extra TEXT;
 -- Failed details fetches for saves, this device only (not synced): when to try again.
 CREATE TABLE fetch_attempts (note_id TEXT PRIMARY KEY, tries INTEGER NOT NULL, next_at INTEGER NOT NULL);
 "#,
+    r#"
+-- Images and voice recordings: JSON array of `Attachment`, NULL when there are none.
+ALTER TABLE notes ADD COLUMN attachments TEXT;
+-- Attachment files this device has sent to the server (this device only, not synced).
+CREATE TABLE media_uploaded (sha256 TEXT PRIMARY KEY);
+"#,
+    r#"
+-- Order of pinned notes' tabs on the edge (see Note::pin_order).
+ALTER TABLE notes ADD COLUMN pin_order INTEGER;
+"#,
+    r#"
+-- Pinned notes this device has shown the user (this device only, not synced). A note pinned on
+-- another device and not in here is new to this one. Notes pinned before this existed count as seen.
+CREATE TABLE pin_seen (note_id TEXT PRIMARY KEY);
+INSERT INTO pin_seen SELECT id FROM notes WHERE pinned = 1;
+"#,
 ];
 
 const NOTE_COLUMNS: &str =
     "id, title, body, pinned, archived, deleted_at, created_at, updated_at, \
-                            device_id, version, conflict_of, color, link, extra";
+                            device_id, version, conflict_of, color, link, extra, attachments, pin_order";
 
 /// The local, offline-first note store. Every write lands here before any sync happens.
 pub struct Store {
@@ -109,6 +125,8 @@ impl Store {
             color: None,
             link: None,
             extra: Default::default(),
+            attachments: Vec::new(),
+            pin_order: None,
         };
         let tx = self.conn.transaction()?;
         write(&tx, &note)?;
@@ -263,7 +281,13 @@ impl Store {
             .canonical
             .as_deref()
             .and_then(clean_url)
-            .filter(|c| crate::link::platform_of(c) == link.platform && *c != link.url);
+            // Not for plain web pages: a page behind a login redirects to a sign-in URL
+            // (with a fresh session id each time), which would replace the saved link.
+            .filter(|c| {
+                link.platform != "web"
+                    && crate::link::platform_of(c) == link.platform
+                    && *c != link.url
+            });
         if let Some(c) = &canonical {
             if let Some(other) = self.live_save_with_url(c, id)? {
                 self.delete(id)?;
@@ -377,8 +401,81 @@ impl Store {
         })
     }
 
+    /// Pinned notes this device has not shown yet: pinned on another device since. Oldest first.
+    pub fn unseen_pins(&self) -> rusqlite::Result<Vec<Uuid>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM notes WHERE pinned = 1 AND deleted_at IS NULL \
+             AND id NOT IN (SELECT note_id FROM pin_seen) ORDER BY updated_at",
+        )?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        ids.map(|s| parse_uuid(0, &s?)).collect()
+    }
+
+    /// The user has seen pinned note `id` here (opened it, or looked at its tab).
+    pub fn mark_pin_seen(&mut self, id: Uuid) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO pin_seen (note_id) VALUES (?1)",
+            [id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// A newly pinned note's tab goes first (top); the others move down. Pinning here counts as
+    /// seen here; unpinning forgets it, so a later pin on another device is new again.
     pub fn set_pinned(&mut self, id: Uuid, pinned: bool) -> rusqlite::Result<Note> {
-        self.edit(id, |n| n.pinned = pinned)
+        if pinned {
+            self.mark_pin_seen(id)?;
+        } else {
+            self.conn
+                .execute("DELETE FROM pin_seen WHERE note_id = ?1", [id.to_string()])?;
+        }
+        let first: Option<i64> = self.conn.query_row(
+            "SELECT min(COALESCE(pin_order, created_at)) FROM notes WHERE pinned = 1 AND deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        let next = first.map_or(now_ms(), |f| f - 1000);
+        self.edit(id, |n| {
+            if pinned && !n.pinned {
+                n.pin_order = Some(next);
+            }
+            n.pinned = pinned;
+        })
+    }
+
+    /// Moves a pinned note's tab to just before `before` (None: to the end), as a drag does.
+    /// Only the moved note changes, unless there is no room between its neighbours; then every
+    /// pinned note is renumbered once.
+    pub fn move_pin(&mut self, id: Uuid, before: Option<Uuid>) -> rusqlite::Result<Note> {
+        let mut pins: Vec<Note> = self
+            .list()?
+            .into_iter()
+            .filter(|n| n.pinned && n.id != id)
+            .collect();
+        pins.sort_by_key(|n| (n.pin_order.unwrap_or(n.created_at), n.created_at));
+        let at = before
+            .and_then(|b| pins.iter().position(|n| n.id == b))
+            .unwrap_or(pins.len());
+        let key = |n: &Note| n.pin_order.unwrap_or(n.created_at);
+        let lo = at.checked_sub(1).map(|i| key(&pins[i]));
+        let hi = pins.get(at).map(key);
+        let order = match (lo, hi) {
+            (Some(l), Some(h)) if h - l >= 2 => Some(l + (h - l) / 2),
+            (Some(_), Some(_)) => None, // no room: renumber below
+            (Some(l), None) => Some(l + 1000),
+            (None, Some(h)) => Some(h - 1000),
+            (None, None) => Some(now_ms()),
+        };
+        if let Some(o) = order {
+            return self.edit(id, |n| n.pin_order = Some(o));
+        }
+        let me = self.get(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        pins.insert(at, me);
+        let base = now_ms();
+        for (i, n) in pins.iter().enumerate() {
+            self.edit(n.id, |n| n.pin_order = Some(base + 1000 * i as i64))?;
+        }
+        self.get(id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
     }
 
     /// Tab colour, "#rrggbb" or None. Anything else is rejected.
@@ -393,6 +490,72 @@ impl Store {
 
     /// Soft delete: the note disappears from list and search but stays as a tombstone, so sync
     /// can tell other devices it was deleted.
+    /// Attaches `a` (its file is already stored under its SHA-256) to note `id`.
+    pub fn add_attachment(&mut self, id: Uuid, a: crate::Attachment) -> rusqlite::Result<Note> {
+        let a = a.sanitize().ok_or(rusqlite::Error::InvalidQuery)?;
+        if self
+            .get(id)?
+            .is_some_and(|n| n.attachments.len() >= crate::attachment::MAX_ATTACHMENTS)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        self.edit(id, |n| n.attachments.push(a))
+    }
+
+    /// Removes attachment `att` from note `id`, leaving a tombstone that syncs.
+    pub fn remove_attachment(&mut self, id: Uuid, att: Uuid) -> rusqlite::Result<Note> {
+        let now = now_ms();
+        self.edit(id, |n| {
+            if let Some(a) = n
+                .attachments
+                .iter_mut()
+                .find(|a| a.id == att && a.is_live())
+            {
+                a.deleted_at = Some(now);
+            }
+        })
+    }
+
+    /// Files of attachments on live notes that this device has not uploaded yet.
+    pub fn media_to_upload(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT json_extract(a.value, '$.sha256') AS sha FROM notes, json_each(notes.attachments) a \
+             WHERE notes.deleted_at IS NULL AND json_extract(a.value, '$.deleted_at') IS NULL \
+             AND sha NOT IN (SELECT sha256 FROM media_uploaded)",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    pub fn mark_uploaded(&mut self, sha256: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO media_uploaded (sha256) VALUES (?1)",
+            [sha256],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes notes left empty on this device (no text, no attachments, not pinned, not a
+    /// save), except `keep`, the one open in the editor. Notes last edited on another device are
+    /// left alone, so a note someone is typing into elsewhere is never removed under them.
+    pub fn delete_empty_notes(&mut self, keep: Option<Uuid>) -> rusqlite::Result<usize> {
+        let keep = keep.map(|k| k.to_string()).unwrap_or_default();
+        let ids: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT id FROM notes WHERE deleted_at IS NULL AND trim(body, ' ' || char(9, 10, 13)) = '' AND link IS NULL \
+                 AND pinned = 0 AND device_id = ?1 AND id != ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM json_each(COALESCE(notes.attachments, '[]')) a \
+                                 WHERE json_extract(a.value, '$.deleted_at') IS NULL)",
+            )?
+            .query_map(params![self.device_id, keep], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in &ids {
+            self.delete(parse_uuid(0, id)?)?;
+        }
+        Ok(ids.len())
+    }
+
     pub fn delete(&mut self, id: Uuid) -> rusqlite::Result<Note> {
         self.edit(id, |n| n.deleted_at = Some(now_ms()))
     }
@@ -408,7 +571,7 @@ impl Store {
         note.version += 1;
         tx.execute(
             "UPDATE notes SET title=?2, body=?3, pinned=?4, archived=?5, deleted_at=?6, \
-             updated_at=?7, device_id=?8, version=?9, color=?10, link=?11, extra=?12 WHERE id=?1",
+             updated_at=?7, device_id=?8, version=?9, color=?10, link=?11, extra=?12, attachments=?13, pin_order=?14 WHERE id=?1",
             params![
                 id.to_string(),
                 note.title,
@@ -422,6 +585,8 @@ impl Store {
                 note.color,
                 link_json(&note),
                 extra_json(&note),
+                attachments_json(&note),
+                note.pin_order,
             ],
         )?;
         index_and_queue(&tx, &note, now)?;
@@ -504,11 +669,13 @@ impl Store {
         ))?;
         let changes = stmt
             .query_map([], |r| {
-                let base = match (r.get::<_, Option<i64>>(14)?, r.get::<_, Option<i64>>(15)?) {
+                // The synced_* columns come right after the note's own columns.
+                let k = NOTE_COLUMNS.split(", ").count();
+                let base = match (r.get::<_, Option<i64>>(k)?, r.get::<_, Option<i64>>(k + 1)?) {
                     (Some(version), Some(h)) => Some(Base {
                         version,
                         body_hash: h as u64,
-                        meta_hash: r.get::<_, Option<i64>>(16)?.map(|m| m as u64),
+                        meta_hash: r.get::<_, Option<i64>>(k + 2)?.map(|m| m as u64),
                     }),
                     _ => None,
                 };
@@ -558,6 +725,12 @@ impl Store {
                 _ => write(&tx, &remote)?,
             }
             set_synced(&tx, &remote)?;
+            if !remote.pinned || remote.deleted_at.is_some() {
+                tx.execute(
+                    "DELETE FROM pin_seen WHERE note_id = ?1",
+                    [remote.id.to_string()],
+                )?;
+            }
         }
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('cursor', ?1) \
@@ -600,9 +773,10 @@ fn get(conn: &Connection, id: Uuid) -> rusqlite::Result<Option<Note>> {
 fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
-            "INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) \
+            "INSERT INTO notes ({NOTE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) \
              ON CONFLICT(id) DO UPDATE SET title=?2, body=?3, pinned=?4, archived=?5, deleted_at=?6, \
-             created_at=?7, updated_at=?8, device_id=?9, version=?10, conflict_of=?11, color=?12, link=?13, extra=?14"
+             created_at=?7, updated_at=?8, device_id=?9, version=?10, conflict_of=?11, color=?12, link=?13, extra=?14, \
+             attachments=?15, pin_order=?16"
         ),
         params![
             n.id.to_string(),
@@ -619,6 +793,8 @@ fn write(conn: &Connection, n: &Note) -> rusqlite::Result<()> {
             n.color,
             link_json(n),
             extra_json(n),
+            attachments_json(n),
+            n.pin_order,
         ],
     )?;
     index(conn, n)
@@ -666,6 +842,11 @@ fn sanitize(mut n: Note) -> Note {
         n.color = None;
     }
     n.link = n.link.and_then(Link::sanitize);
+    n.attachments = std::mem::take(&mut n.attachments)
+        .into_iter()
+        .filter_map(crate::Attachment::sanitize)
+        .take(crate::attachment::MAX_ATTACHMENTS)
+        .collect();
     n.cap_extra();
     n
 }
@@ -673,6 +854,11 @@ fn sanitize(mut n: Note) -> Note {
 fn extra_json(n: &Note) -> Option<String> {
     (!n.extra.is_empty())
         .then(|| serde_json::to_string(&n.extra).expect("a JSON map always serialises"))
+}
+
+fn attachments_json(n: &Note) -> Option<String> {
+    (!n.attachments.is_empty())
+        .then(|| serde_json::to_string(&n.attachments).expect("attachments always serialise"))
 }
 
 fn link_json(n: &Note) -> Option<String> {
@@ -731,6 +917,11 @@ fn note_from_row(r: &Row) -> rusqlite::Result<Note> {
             .get::<_, Option<String>>(13)?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default(),
+        attachments: r
+            .get::<_, Option<String>>(14)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        pin_order: r.get(15)?,
     })
 }
 
@@ -775,6 +966,104 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory("test-device").unwrap()
+    }
+
+    #[test]
+    fn new_pins_go_last_and_a_drag_reorders_editing_only_what_moved() {
+        let mut s = store();
+        let [a, b, c] = ["a", "b", "c"].map(|t| s.create(t).unwrap().id);
+        for id in [b, a, c] {
+            s.set_pinned(id, true).unwrap();
+        }
+        let order = |s: &Store| {
+            let mut p: Vec<_> = s.list().unwrap().into_iter().filter(|n| n.pinned).collect();
+            p.sort_by_key(|n| n.pin_order);
+            p.into_iter().map(|n| n.body).collect::<Vec<_>>()
+        };
+        assert_eq!(order(&s), ["c", "a", "b"], "newest pin on top");
+        let versions = |s: &Store| [a, b, c].map(|id| s.get(id).unwrap().unwrap().version);
+        let before = versions(&s);
+        s.move_pin(a, Some(c)).unwrap(); // drag "a" to the top
+        assert_eq!(order(&s), ["a", "c", "b"]);
+        s.move_pin(a, None).unwrap(); // and to the end
+        assert_eq!(order(&s), ["c", "b", "a"]);
+        s.move_pin(a, Some(b)).unwrap(); // between c and b
+        assert_eq!(order(&s), ["c", "a", "b"]);
+        let after = versions(&s);
+        let edited: i64 = before.iter().zip(after).map(|(x, y)| y - x).sum();
+        assert!(edited <= 3 + 3, "renumbering at most once");
+    }
+
+    #[test]
+    fn empty_notes_are_deleted_except_the_open_one_and_ones_with_files() {
+        let mut s = store();
+        let open = s.create("").unwrap();
+        let blank = s.create("  \n ").unwrap();
+        let photo = s.create("").unwrap();
+        let att = crate::attachment::new_attachment(
+            "a".repeat(64),
+            1,
+            "image/png",
+            None,
+            None,
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        s.add_attachment(photo.id, att).unwrap();
+        let text = s.create("milk").unwrap();
+        let mut other = Store::open_in_memory("phone").unwrap();
+        let theirs = other.create("").unwrap();
+        s.apply_sync(
+            &Default::default(),
+            &crate::sync::SyncResponse {
+                cursor: 1,
+                notes: vec![theirs.clone()],
+                more: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.delete_empty_notes(Some(open.id)).unwrap(), 1);
+        let left: Vec<_> = s.list().unwrap().into_iter().map(|n| n.id).collect();
+        assert!(!left.contains(&blank.id));
+        for kept in [open.id, photo.id, text.id, theirs.id] {
+            assert!(left.contains(&kept));
+        }
+    }
+
+    #[test]
+    fn files_to_upload_are_live_attachments_not_sent_yet() {
+        let mut s = store();
+        let n = s.create("Trip").unwrap();
+        let att = |c: char| {
+            crate::attachment::new_attachment(
+                c.to_string().repeat(64),
+                1,
+                "image/png",
+                None,
+                None,
+                None,
+                None,
+                1,
+            )
+            .unwrap()
+        };
+        let (a, b, c) = (att('a'), att('b'), att('c'));
+        s.add_attachment(n.id, a.clone()).unwrap();
+        s.add_attachment(n.id, b.clone()).unwrap();
+        s.add_attachment(n.id, c.clone()).unwrap();
+        s.remove_attachment(n.id, c.id).unwrap();
+        s.mark_uploaded(&a.sha256).unwrap();
+        assert_eq!(
+            s.media_to_upload().unwrap(),
+            std::slice::from_ref(&b.sha256)
+        );
+        s.delete(n.id).unwrap();
+        assert!(
+            s.media_to_upload().unwrap().is_empty(),
+            "a deleted note's files are not sent"
+        );
     }
 
     #[test]
@@ -959,6 +1248,20 @@ mod tests {
             .set_save_details(v.id, &preview("new workout plan", None))
             .unwrap();
         assert_eq!(n.link.unwrap().folder.as_deref(), Some("Gifts for Maa"));
+    }
+
+    #[test]
+    fn a_web_page_behind_a_login_keeps_its_own_link() {
+        let mut s = store();
+        let url = "https://play.google.com/apps/testing/com.asin.cnglocator";
+        let (v, _) = s.create_save(url).unwrap();
+        let signin = format!("https://accounts.google.com/v3/signin/identifier?continue={url}");
+        let n = s
+            .set_save_details(v.id, &preview("Sign in - Google Accounts", Some(&signin)))
+            .unwrap();
+        assert_eq!(n.link.unwrap().url, url);
+        // So saving it again finds the first save instead of making a copy.
+        assert!(!s.create_save(url).unwrap().1);
     }
 
     #[test]

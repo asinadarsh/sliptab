@@ -1,7 +1,8 @@
 <!-- A · Clean cards: big capture box, pinned row, cards with two-line previews. -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { ago, preview, progress, type Note, type Section } from "$lib/notes";
+  import { pinDrag } from "$lib/pindrag";
+  import { ago, attachSummary, preview, progress, type Note, type Section } from "$lib/notes";
 
   let {
     sections,
@@ -9,6 +10,8 @@
     query,
     onOpen,
     onPin,
+    onMovePin,
+    unseen = new Set(),
     onHover,
     header,
     capture,
@@ -18,6 +21,10 @@
     query: string;
     onOpen: (n: Note) => void;
     onPin: (n: Note) => void;
+    /** Drag a pinned note: its tab goes before `before` (null: last). */
+    onMovePin: (id: string, before: string | null) => void;
+    /** Pinned on another device and not opened here yet. */
+    unseen?: Set<string>;
     onHover: (n: Note) => void;
     header: Snippet;
     capture: Snippet<["big" | "slim" | "tile"]>;
@@ -30,14 +37,20 @@
   {#each sections as s (s.name)}
     <div class="sec">{s.name}</div>
     {#if s.name === "Pinned"}
-      <div class="pins">
+      <div class="pins" use:pinDrag={onMovePin} onwheel={(e) => {
+        const el = e.currentTarget;
+        if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && el.scrollWidth > el.clientWidth) {
+          el.scrollLeft += e.deltaY;
+          e.preventDefault();
+        }
+      }}>
         {#each s.notes as n (n.id)}
           {@const p = progress(n)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="pin" class:sel={n.id === selectedId} data-id={n.id} style:--c={n.color ?? "var(--faint)"}
+          <div class="pin" class:fresh={unseen.has(n.id)} class:sel={n.id === selectedId} data-id={n.id} data-pin={n.id} title="Drag to change its place on the edge" style:--c={n.color ?? "var(--faint)"}
             onclick={() => onOpen(n)} onmouseenter={() => onHover(n)}>
-            <div class="pin-t">{n.title || "Untitled"}</div>
-            <div class="pin-p">{preview(n)}</div>
+            <div class="pin-t">{#if unseen.has(n.id)}<span class="new">New</span>{/if}{n.title || "Untitled"}</div>
+            <div class="pin-p">{preview(n) || attachSummary(n)}</div>
             <div class="pin-f">
               {#if p}<span class="bar"><i style:width="{(p.done / p.total) * 100}%"></i></span><span>{p.done}/{p.total}</span>{/if}
               <span class="time">{ago(n.updated_at)}</span>
@@ -56,6 +69,7 @@
             <div class="time">{ago(n.updated_at)}</div>
           </div>
           {#if preview(n)}<div class="p">{preview(n)}</div>{/if}
+          {#if attachSummary(n)}<div class="att">{attachSummary(n)}</div>{/if}
           {#if p}<div class="prog"><span class="bar"><i style:width="{(p.done / p.total) * 100}%"></i></span><span>{p.done}/{p.total}</span></div>{/if}
         </div>
       {/each}
@@ -68,9 +82,12 @@
 <style>
   .scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 2px 8px; }
   .sec { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); margin: 14px 2px 8px; }
-  .pins { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 4px; scrollbar-width: none; }
+  /* One size for every pinned card, so several fit side by side; the row scrolls sideways
+     (mouse wheel too) and fades at the right edge to show there is more. */
+  .pins { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 4px; scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
   .pins::-webkit-scrollbar { display: none; }
-  .pin { flex: 0 0 150px; background: var(--surface); border-radius: 12px; padding: 10px 12px; border-top: 4px solid var(--c);
+  .pin { flex: 0 0 min(190px, 42%); min-width: 0; box-sizing: border-box; background: var(--surface); border-radius: 12px; padding: 10px 12px; border-top: 4px solid var(--c);
     box-shadow: 0 1px 3px var(--shadow); cursor: pointer; }
   .pin-t, .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pin-t { font-size: 13.5px; }
@@ -90,4 +107,14 @@
   .card:hover .pinbtn, .card.sel .pinbtn { opacity: 0.45; }
   .pinbtn:hover { opacity: 1 !important; }
   .empty { color: var(--faint); padding: 24px 4px; text-align: center; }
+  .att {
+    font-size: 11.5px;
+    color: var(--faint);
+    margin-top: 4px;
+  }
+  .pin.fresh { box-shadow: 0 0 0 1.5px var(--c), 0 0 18px -2px var(--c); animation: glow 1.6s ease-in-out infinite; }
+  @keyframes glow { 50% { box-shadow: 0 0 0 1.5px var(--c), 0 0 26px 2px var(--c); } }
+  @media (prefers-reduced-motion: reduce) { .pin.fresh { animation: none; } }
+  .new { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    color: #fff; background: var(--c); border-radius: 4px; padding: 1px 5px; margin-right: 6px; vertical-align: 1px; }
 </style>

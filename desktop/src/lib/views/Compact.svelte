@@ -1,7 +1,8 @@
 <!-- B · Compact list: dense keyboard-first rows; the selected row shows a short preview. -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { ago, preview, progress, type Note, type Section } from "$lib/notes";
+  import { pinDrag } from "$lib/pindrag";
+  import { ago, attachSummary, preview, progress, type Note, type Section } from "$lib/notes";
 
   let {
     sections,
@@ -9,6 +10,8 @@
     query,
     onOpen,
     onPin,
+    onMovePin,
+    unseen = new Set(),
     onHover,
     header,
     capture,
@@ -18,6 +21,10 @@
     query: string;
     onOpen: (n: Note) => void;
     onPin: (n: Note) => void;
+    /** Drag a pinned note: its tab goes before `before` (null: last). */
+    onMovePin: (id: string, before: string | null) => void;
+    /** Pinned on another device and not opened here yet. */
+    unseen?: Set<string>;
     onHover: (n: Note) => void;
     header: Snippet;
     capture: Snippet<["big" | "slim" | "tile"]>;
@@ -25,18 +32,18 @@
 </script>
 
 {@render header()}
-<div class="list">
+<div class="list" use:pinDrag={onMovePin}>
   {#each sections as s (s.name)}
     <div class="sec">{s.name}</div>
     {#each s.notes as n (n.id)}
       {@const p = progress(n)}
       {@const sel = n.id === selectedId}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="r" class:sel data-id={n.id} onclick={() => onOpen(n)} onmouseenter={() => onHover(n)}>
+      <div class="r" class:sel data-id={n.id} data-pin={n.pinned ? n.id : undefined} onclick={() => onOpen(n)} onmouseenter={() => onHover(n)}>
         <button class="dot" class:on={n.pinned} style:--c={n.color ?? "var(--line)"} aria-label={n.pinned ? "Unpin" : "Pin"}
           title={n.pinned ? "Unpin" : "Pin to the edge"} onclick={(e) => { e.stopPropagation(); onPin(n); }}></button>
-        <span class="t">{n.title || "Untitled"}</span>
-        <span class="p">{preview(n)}</span>
+        <span class="t">{#if unseen.has(n.id)}<span class="new" style:--c={n.color ?? "var(--accent)"}>New</span>{/if}{n.title || "Untitled"}</span>
+        <span class="p">{preview(n) || attachSummary(n)}</span>
         {#if p}<span class="cn">{p.done}/{p.total}</span>{/if}
         <span class="time">{ago(n.updated_at)}</span>
       </div>
@@ -68,4 +75,6 @@
   .peek span { color: var(--faint); font-size: 11px; }
   .keys { padding: 8px 4px 0; color: var(--faint); font-size: 11px; display: flex; gap: 14px; }
   .empty { color: var(--faint); padding: 24px 4px; text-align: center; }
+  .new { display: inline-block; font-size: 9.5px; font-weight: 700; text-transform: uppercase; color: #fff;
+    background: var(--c); border-radius: 4px; padding: 1px 5px; margin-right: 6px; vertical-align: 1px; }
 </style>

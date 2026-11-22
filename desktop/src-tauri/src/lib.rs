@@ -98,6 +98,40 @@ fn note_update(s: State<Notes>, id: Uuid, body: String, sync: State<SyncState>) 
     Ok(n)
 }
 
+/// Drag on the Pinned row: `id`'s tab goes just before `before`'s (None: last).
+#[tauri::command]
+fn note_move_pin(
+    s: State<Notes>,
+    id: Uuid,
+    before: Option<Uuid>,
+    sync: State<SyncState>,
+) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.move_pin(id, before))?;
+    sync.kick(false);
+    Ok(n)
+}
+
+/// Pinned notes pinned on another device and not looked at here yet.
+#[tauri::command]
+fn pins_unseen(s: State<Notes>) -> CmdResult<Vec<Uuid>> {
+    with_store(&s, |st| st.unseen_pins())
+}
+
+#[tauri::command]
+fn pin_seen(s: State<Notes>, id: Uuid) -> CmdResult<()> {
+    with_store(&s, |st| st.mark_pin_seen(id))
+}
+
+/// Removes notes left empty here, except the one open in the editor (`keep`).
+#[tauri::command]
+fn notes_clean(s: State<Notes>, keep: Option<Uuid>, sync: State<SyncState>) -> CmdResult<usize> {
+    let n = with_store(&s, |st| st.delete_empty_notes(keep))?;
+    if n > 0 {
+        sync.kick(false);
+    }
+    Ok(n)
+}
+
 #[tauri::command]
 fn note_set_pinned(
     s: State<Notes>,
@@ -108,6 +142,95 @@ fn note_set_pinned(
     let n = with_store(&s, |st| st.set_pinned(id, pinned))?;
     sync.kick(false);
     Ok(n)
+}
+
+/// Attaches a file (an image, audio or any other file, at most 50 MB) to note `id`. The bytes arrive raw
+/// in the request body; what they are travels in headers, percent-encoded.
+#[tauri::command]
+fn note_attach(
+    s: State<Notes>,
+    sync: State<SyncState>,
+    request: tauri::ipc::Request,
+) -> CmdResult<Note> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected the file's bytes".into());
+    };
+    let h = |k: &str| {
+        request
+            .headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(percent_decode)
+    };
+    let id: Uuid = h("x-note")
+        .and_then(|v| v.parse().ok())
+        .ok_or("missing note id")?;
+    let mime = h("x-mime").unwrap_or_default();
+    let num = |k: &str| h(k).and_then(|v| v.parse::<u64>().ok());
+    let (sha, len) =
+        notes_core::attachment::store_file(&sync.media_dir(), bytes).map_err(|e| e.to_string())?;
+    let a = notes_core::attachment::new_attachment(
+        sha,
+        len,
+        &mime,
+        h("x-name").filter(|n| !n.is_empty()),
+        num("x-width").map(|v| v as u32),
+        num("x-height").map(|v| v as u32),
+        num("x-duration"),
+        now_ms(),
+    )
+    .ok_or("This file can't be attached.")?;
+    let n = with_store(&s, |st| st.add_attachment(id, a))?;
+    sync.kick(false);
+    Ok(n)
+}
+
+#[tauri::command]
+fn note_detach(
+    s: State<Notes>,
+    id: Uuid,
+    attachment: Uuid,
+    sync: State<SyncState>,
+) -> CmdResult<Note> {
+    let n = with_store(&s, |st| st.remove_attachment(id, attachment))?;
+    sync.kick(false);
+    Ok(n)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+#[test]
+fn file_names_from_the_page_are_decoded() {
+    assert_eq!(
+        percent_decode("Voice%20note%20%E2%9C%93.m4a"),
+        "Voice note ✓.m4a"
+    );
+    assert_eq!(percent_decode("100%"), "100%");
+}
+
+/// Header values are ASCII, so the page percent-encodes file names (encodeURIComponent).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[tauri::command]
@@ -501,6 +624,14 @@ pub fn run() {
             note_set_pinned,
             note_set_color,
             note_delete,
+            note_attach,
+            note_move_pin,
+            notes_clean,
+            pins_unseen,
+            pin_seen,
+            note_detach,
+            sync::media_get,
+            sync::media_open,
             saves_list,
             saves_search,
             save_folders,

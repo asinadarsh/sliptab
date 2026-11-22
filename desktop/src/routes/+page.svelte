@@ -4,12 +4,13 @@
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
   import { captureHotkey, formatHotkey } from "$lib/accel";
-  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note, isOnlyLink, platformName, saveTitle, PLATFORMS } from "$lib/notes";
+  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note, type Attachment, liveAttachments, isOnlyLink, platformName, saveTitle, PLATFORMS } from "$lib/notes";
   import Cards from "$lib/views/Cards.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Sticky from "$lib/views/Sticky.svelte";
   import Onboarding from "$lib/Onboarding.svelte";
   import RichEditor from "$lib/RichEditor.svelte";
+  import Attachments from "$lib/Attachments.svelte";
   import { plain } from "$lib/format";
   import "@fontsource-variable/figtree";
   import "@fontsource/instrument-serif/400.css";
@@ -281,6 +282,7 @@
   // ---- notes
   async function refresh() {
     all = await invoke<Note[]>("notes_list");
+    unseen = new Set(await invoke<string[]>("pins_unseen"));
     notes = query.trim() && tab === "notes" ? await invoke<Note[]>("notes_search", { query }) : all;
     allSaves = await invoke<Note[]>("saves_list");
     found = query.trim() && tab === "saved" ? await invoke<Note[]>("saves_search", { query }) : allSaves;
@@ -293,6 +295,14 @@
     if (!flat.some((n) => n.id === selectedId)) selectedId = flat[0]?.id ?? null;
   }
 
+  /** Pinned on another device and not looked at here yet: their tabs and cards call for attention. */
+  let unseen: Set<string> = $state(new Set());
+  function seen(id: string) {
+    if (!unseen.has(id)) return;
+    unseen = new Set([...unseen].filter((x) => x !== id));
+    void invoke("pin_seen", { id }).catch((e) => log(`pin_seen: ${e}`));
+  }
+
   /** Put an updated note into both lists at once, so tabs and cards change without a reload. */
   function patch(n: Note) {
     all = all.map((x) => (x.id === n.id ? n : x));
@@ -300,6 +310,7 @@
   }
 
   async function open(n: Note) {
+    seen(n.id);
     await flushSave();
     editing = n;
     draft = n.body;
@@ -324,9 +335,9 @@
   async function addQuick() {
     const body = quick.trim();
     if (!body) return;
-    if (savesOn && isOnlyLink(body)) {
+    // Only the Saved tab turns a pasted link into a save; on Notes, a link is just a note.
+    if (savesOn && tab === "saved" && isOnlyLink(body)) {
       await invoke("save_create", { text: body });
-      tab = "saved";
     } else {
       await invoke("note_create", { body });
     }
@@ -373,6 +384,84 @@
     await refresh();
   }
 
+  // ---- attachments (images and recordings, up to 50 MB each)
+  const MAX_BYTES = 50 * 1024 * 1024;
+  let fileInput: HTMLInputElement | undefined = $state();
+  let galleryInput: HTMLInputElement | undefined = $state();
+  let attachMenu = $state(false);
+  let attaching = $state("");
+  /** While the Bar position slider moves: the value it shows, before it is saved. */
+  let barPreview: number | null = $state(null);
+
+  /** Width and height of an image, or the length of a recording, read in the page. */
+  async function measure(f: File): Promise<{ width?: number; height?: number; duration?: number }> {
+    const url = URL.createObjectURL(f);
+    try {
+      if (f.type.startsWith("image/")) {
+        const img = new Image();
+        img.src = url;
+        await img.decode();
+        return { width: img.naturalWidth, height: img.naturalHeight };
+      }
+      const a = new Audio();
+      a.preload = "metadata";
+      a.src = url;
+      await new Promise((ok) => ((a.onloadedmetadata = ok), (a.onerror = ok), setTimeout(ok, 3000)));
+      return Number.isFinite(a.duration) ? { duration: Math.round(a.duration * 1000) } : {};
+    } catch {
+      return {};
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  /** Attaches files to `target` (the open note by default; a recording keeps the note it began in). */
+  async function attach(files: File[], target: Note | null = editing) {
+    if (!target) return;
+    if (editing?.id === target.id) await flushSave();
+    for (const f of files) {
+      if (f.size > MAX_BYTES) {
+        attaching = `${f.name} is ${(f.size / 1e6).toFixed(0)} MB. Attachments can be up to 50 MB.`;
+        continue;
+      }
+      attaching = `Adding ${f.name || "image"}…`;
+      const m = await measure(f);
+      const headers: Record<string, string> = { "x-note": target.id, "x-mime": f.type || "application/octet-stream", "x-name": encodeURIComponent(f.name) };
+      if (m.width) headers["x-width"] = String(m.width);
+      if (m.height) headers["x-height"] = String(m.height);
+      if (m.duration) headers["x-duration"] = String(m.duration);
+      try {
+        const n = await invoke<Note>("note_attach", new Uint8Array(await f.arrayBuffer()), { headers });
+        if (editing?.id === n.id) editing = n;
+        patch(n);
+        attaching = "";
+      } catch (e) {
+        attaching = `Could not add ${f.name}: ${e}`;
+      }
+    }
+  }
+
+  // A note opened and left without text or attachments (Full editor, then away) is removed,
+  // whichever way the editor was left: Back, another note, the rail, the panel closing.
+  $effect(() => {
+    const keep = editing?.id ?? null;
+    void invoke<number>("notes_clean", { keep })
+      .then((n) => { if (n > 0) void refresh(); })
+      .catch((e) => log(`notes_clean: ${e}`));
+  });
+
+  async function movePin(id: string, before: string | null) {
+    const n = await invoke<Note>("note_move_pin", { id, before });
+    patch(n);
+    await refresh();
+  }
+
+  async function detach(a: Attachment) {
+    if (!editing) return;
+    editing = await invoke<Note>("note_detach", { id: editing.id, attachment: a.id });
+    patch(editing);
+  }
+
   /** Runs a menu action and closes the menu. A failure is logged, not dropped silently. */
   function act(f: () => unknown) {
     menu = null;
@@ -409,7 +498,7 @@
   async function back() {
     await flushSave();
     // A note left empty (opened with the full editor, nothing typed) is not kept as "Untitled".
-    if (editing && !draft.trim()) await invoke("note_delete", { id: editing.id });
+    if (editing && !draft.trim() && !liveAttachments(editing).length) await invoke("note_delete", { id: editing.id });
     editing = null;
     await refresh();
     await tick();
@@ -440,7 +529,46 @@
     pointerAt(x, y, entering);
   }
 
+  // ---- hold a tab on the edge and move it up or down to change its place
+  let tabDrag: { id: string; y: number; moved: boolean; over: { id: string; after: boolean } | null } | null = $state(null);
+  let justDragged = false;
+
+  function tabDragMove(y: number) {
+    const d = tabDrag;
+    if (!d) return;
+    if (!d.moved && Math.abs(y - d.y) < 6) return;
+    d.moved = true;
+    hoverTab = null;
+    const ids = edgeItems.tabs.map((n) => n.id);
+    const from = ids.indexOf(d.id);
+    d.over = null;
+    for (const el of document.querySelectorAll<HTMLElement>(".strip .tab[data-id]")) {
+      const r = el.getBoundingClientRect();
+      if (el.dataset.id !== d.id && y >= r.top && y <= r.bottom) {
+        // It takes the other tab's place: below it when moving down, above it when moving up.
+        d.over = { id: el.dataset.id!, after: ids.indexOf(el.dataset.id!) > from };
+      }
+    }
+  }
+
+  function tabDragEnd() {
+    const d = tabDrag;
+    tabDrag = null;
+    if (!d?.moved) return;
+    justDragged = true; // the click that ends the hold must not open the note
+    setTimeout(() => (justDragged = false), 300);
+    if (!d.over) return;
+    const ids = edgeItems.tabs.map((n) => n.id).filter((id) => id !== d.id);
+    const before = ids[ids.indexOf(d.over.id) + (d.over.after ? 1 : 0)] ?? null;
+    log(`edge tab ${d.id} moved before ${before}`);
+    void movePin(d.id, before);
+  }
+
   function pointerAt(x: number, y: number, entering: boolean) {
+    if (tabDrag) {
+      tabDragMove(y);
+      return;
+    }
     if (mode === "expanded") {
       if (entering) edge.pointerEnter();
       else edge.pointerMove();
@@ -461,6 +589,13 @@
   }
 
   const hovered = $derived(edgeItems.tabs.find((n) => n.id === hoverTab) ?? null);
+  // Its preview card shown for a moment counts as seen (a passing pointer does not).
+  $effect(() => {
+    const id = hovered?.id;
+    if (!id || !unseen.has(id)) return;
+    const t = setTimeout(() => seen(id), 1200);
+    return () => clearTimeout(t);
+  });
   // While the card shows (and the panel is collapsed), Rust adds its box to the clickable area.
   let peekEl: HTMLElement | undefined = $state();
   $effect(() => {
@@ -639,6 +774,9 @@
     });
     // Any click, key, scroll or leaving the window closes it.
     const close = () => (menu = null);
+    document.addEventListener("pointerdown", (e) => {
+      if (!(e.target as HTMLElement).closest(".attach-menu, [aria-label='Attach']")) attachMenu = false;
+    });
     document.addEventListener("pointerdown", (e) => !(e.target as HTMLElement).closest(".ctx") && close());
     document.addEventListener("keydown", (e) => e.key === "Escape" && close());
     document.addEventListener("scroll", close, true);
@@ -656,6 +794,8 @@
         pointerAt(e.payload.x, e.payload.y, e.payload.kind === "enter");
       }
     });
+    window.addEventListener("pointerup", tabDragEnd);
+    window.addEventListener("pointercancel", () => (tabDrag = null));
     document.addEventListener("mouseout", (e) => {
       if (!e.relatedTarget && !standalone) {
         hoverTab = null;
@@ -781,7 +921,13 @@
   >
     {#each edgeItems.tabs as n (n.id)}
       <button class="tab" class:hover={hoverTab === n.id} data-edge="tab" data-id={n.id} style:--c={n.color ?? "var(--bar)"}
-        onclick={() => openTab(n)} aria-label="Open {n.title}"></button>
+        class:lifted={tabDrag?.moved && tabDrag.id === n.id}
+        class:fresh={unseen.has(n.id)}
+        class:drop-before={tabDrag?.over?.id === n.id && !tabDrag.over.after}
+        class:drop-after={tabDrag?.over?.id === n.id && tabDrag.over.after}
+        onpointerdown={(e) => { if (e.button === 0) tabDrag = { id: n.id, y: e.clientY, moved: false, over: null }; }}
+        onpointermove={(e) => tabDragMove(e.clientY)}
+        onclick={() => !justDragged && openTab(n)} aria-label="Open {n.title} (hold and move to change its place)"></button>
     {/each}
     {#if edgeItems.more}
       <button class="tab more" data-edge="bar" onclick={() => edge.click()} aria-label="{edgeItems.more} more pinned notes">
@@ -951,10 +1097,21 @@
             <button class:on={cfg.side === "right"} onclick={() => saveSettings({ side: "right" })}>Right</button>
           </div>
         </section>
-        <section class="setting">
-          <label class="grow" for="barpos">Bar position</label>
-          <input id="barpos" type="range" min="0" max="1" step="0.01" value={cfg.barPosition}
-            onchange={(e) => saveSettings({ barPosition: +e.currentTarget.value })} />
+        <section class="setting barpos">
+          <div class="grow">
+            <label for="barpos">Bar position</label>
+            <input id="barpos" type="range" min="0" max="1" step="0.01" value={cfg.barPosition}
+              oninput={(e) => (barPreview = +e.currentTarget.value)}
+              onchange={(e) => { barPreview = null; void saveSettings({ barPosition: +e.currentTarget.value }); }} />
+          </div>
+          <!-- The panel covers the real bar while settings are open, so this small screen shows
+               where the bar and its tabs will sit. -->
+          <div class="screen" class:left={cfg.side === "left"} aria-hidden="true">
+            <div class="mini" style:top="calc((100% - {12 + edgeItems.tabs.length * 7}px - 26px) * {barPreview ?? cfg.barPosition} + 6px)">
+              {#each edgeItems.tabs as n (n.id)}<i style:background={n.color ?? "var(--faint)"}></i>{/each}
+              <b></b>
+            </div>
+          </div>
         </section>
         <section class="setting">
           <div class="grow"><div>Open on hover</div><div class="sub">Off: opens only on click or the hotkey.</div></div>
@@ -1004,10 +1161,28 @@
         <button onclick={() => rich?.underline()} title="Underline (Ctrl+U)" aria-label="Underline"><u>U</u></button>
         <button onclick={() => rich?.strike()} title="Strikethrough (Ctrl+Shift+X)" aria-label="Strikethrough"><s>S</s></button>
         <button onclick={() => rich?.checklist()} title="Checklist (Ctrl+Shift+L)" aria-label="Checklist"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12.5l2.8 2.8L16 9.5"/></svg></button>
+        <button onclick={() => (attachMenu = !attachMenu)} title="Attach an image or a file (or paste / drop one)" aria-label="Attach"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
+        {#if attachMenu}
+          <div class="ctx attach-menu" role="menu">
+            <button role="menuitem" onclick={() => { attachMenu = false; galleryInput?.click(); }}>Gallery <span>images</span></button>
+            <button role="menuitem" onclick={() => { attachMenu = false; fileInput?.click(); }}>Document <span>any file, music, recordings</span></button>
+          </div>
+        {/if}
+        <input bind:this={galleryInput} type="file" accept="image/*" multiple hidden onchange={(e) => { const t = e.currentTarget; void attach([...(t.files ?? [])]); t.value = ""; }} />
+        <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => { const t = e.currentTarget; void attach([...(t.files ?? [])]); t.value = ""; }} />
         <span class="fb-hint">Select text, then B / I / U / S · Ctrl+click opens links</span>
       </div>
-      <div class="editor">
-        <RichEditor bind:this={rich} bind:el={editorEl} bind:value={draft} oninput={scheduleSave} onopenlink={(href) => void invoke("open_link", { url: href })} />
+      {#if attaching}<div class="attaching">{attaching}</div>{/if}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="editor" onmousedown={(e) => {
+        // The text is only as tall as its lines: a click on the empty space below types at the end.
+        if (!(e.target as HTMLElement).closest(".rich, .atts")) {
+          e.preventDefault();
+          rich?.focusEnd();
+        }
+      }}>
+        <Attachments items={liveAttachments(editing)} onremove={detach} />
+        <RichEditor bind:this={rich} bind:el={editorEl} bind:value={draft} oninput={scheduleSave} onfiles={attach} onopenlink={(href) => void invoke("open_link", { url: href })} />
       </div>
     {:else if tab === "saved"}
       {@render header()}
@@ -1044,6 +1219,8 @@
         {capture}
         onOpen={(n: Note) => open(n)}
         onPin={(n: Note) => togglePin(n)}
+        onMovePin={movePin}
+        {unseen}
         onHover={(n: Note) => (selectedId = n.id)}
       />
     {/if}
@@ -1117,6 +1294,62 @@
     color: var(--text);
     font-weight: 600;
     cursor: pointer;
+  }
+  /* Dragging a pinned note (lib/pindrag.ts): where it will land. */
+  :global([data-pin].dragging) {
+    opacity: 0.45;
+  }
+  :global([data-pin].drop-before) {
+    box-shadow: -3px 0 0 var(--accent);
+  }
+  :global([data-pin].drop-after) {
+    box-shadow: 3px 0 0 var(--accent);
+  }
+  :global(.list [data-pin].drop-before) {
+    box-shadow: 0 -2px 0 var(--accent);
+  }
+  :global(.list [data-pin].drop-after) {
+    box-shadow: 0 2px 0 var(--accent);
+  }
+  .setting.barpos input {
+    width: 100%;
+    margin-top: 8px;
+  }
+  .screen {
+    position: relative;
+    flex: none;
+    width: 92px;
+    height: 58px;
+    border-radius: 6px;
+    border: 1.5px solid var(--line);
+    background: var(--surface-2);
+  }
+  .screen .mini {
+    position: absolute;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+  }
+  .screen.left .mini {
+    right: auto;
+    left: 0;
+    align-items: flex-start;
+  }
+  .screen .mini i {
+    width: 7px;
+    height: 5px;
+    border-radius: 2px 0 0 2px;
+  }
+  .screen.left .mini i {
+    border-radius: 0 2px 2px 0;
+  }
+  .screen .mini b {
+    width: 3px;
+    height: 20px;
+    border-radius: 2px 0 0 2px;
+    background: var(--bar); /* the bar colour from settings */
   }
   .ask-back {
     position: fixed;
@@ -1287,6 +1520,19 @@
     border: 0;
     cursor: pointer;
   }
+  /* An app, not a page: lists, cards and labels are not selectable text (a press-and-drag
+     selected words); the editor, fields and previews still are. */
+  main {
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  main :global(input),
+  main :global(textarea),
+  main :global(.rich),
+  main :global([contenteditable]) {
+    user-select: text;
+    -webkit-user-select: text;
+  }
   main {
     height: 100vh;
     display: flex;
@@ -1322,6 +1568,32 @@
   .tab {
     height: 36px;
     background: var(--c);
+  }
+  /* Pinned on the other device and not seen here: the tab flashes bright with a light running
+     down it (the edge window is only the strip's width, so nothing may move outside it) until
+     its card is looked at or the note is opened. */
+  .tab.fresh {
+    background-image: linear-gradient(180deg, transparent 0%, rgba(255, 255, 255, 0.85) 50%, transparent 100%);
+    background-size: 100% 60%;
+    background-repeat: no-repeat;
+    animation: fresh 1.4s ease-in-out infinite;
+  }
+  @keyframes fresh {
+    0% { background-position: 0 -120%; filter: brightness(1); }
+    50% { filter: brightness(1.45) saturate(1.3); }
+    100% { background-position: 0 220%; filter: brightness(1); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tab.fresh { animation: none; filter: brightness(1.4); }
+  }
+  .tab.lifted {
+    opacity: 0.5;
+  }
+  .tab.drop-before {
+    box-shadow: 0 -3px 0 var(--text);
+  }
+  .tab.drop-after {
+    box-shadow: 0 3px 0 var(--text);
   }
   .tab.more {
     background: var(--bar);
@@ -1657,6 +1929,24 @@
     padding: 0 4px;
     font: inherit;
     font-size: 10px;
+  }
+  .format-bar {
+    position: relative;
+  }
+  .attach-menu {
+    position: absolute;
+    top: 32px;
+    left: 150px;
+  }
+  .attach-menu span {
+    color: var(--faint);
+    font-size: 11.5px;
+    margin-left: 6px;
+  }
+  .attaching {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 0 4px;
   }
   .format-bar {
     display: flex;

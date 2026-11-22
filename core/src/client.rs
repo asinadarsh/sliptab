@@ -227,6 +227,87 @@ impl Client {
         Err(server("sync did not finish"))
     }
 
+    /// Uploads attachment files this device has and the server may not, so other devices can
+    /// download them. Call before `sync`. A file that fails stays pending for the next time;
+    /// the note syncs anyway and the other device shows the file once it arrives.
+    pub fn upload_media(
+        &self,
+        store: &Mutex<Store>,
+        token: &str,
+        media_dir: &std::path::Path,
+    ) -> Result<usize> {
+        let mut done = 0;
+        for sha in lock(store).media_to_upload().map_err(local)? {
+            let Ok(bytes) = std::fs::read(media_dir.join(&sha)) else {
+                continue; // attached on another device and not downloaded here
+            };
+            let resp = self
+                .media_agent()
+                .put(format!("{}/v1/media/{sha}", self.base))
+                .header("authorization", bearer(token))
+                .header("x-edge-client", app_id())
+                .header("content-type", "application/octet-stream")
+                .send(&bytes[..]);
+            read::<serde::de::IgnoredAny>(resp)?;
+            lock(store).mark_uploaded(&sha).map_err(local)?;
+            done += 1;
+        }
+        Ok(done)
+    }
+
+    /// The local file for attachment `sha256`, downloading it first if this device lacks it.
+    /// The download is checked against its hash before it gets its real name.
+    pub fn media_file(
+        &self,
+        token: &str,
+        media_dir: &std::path::Path,
+        sha256: &str,
+    ) -> Result<std::path::PathBuf> {
+        let valid = sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit());
+        if !valid {
+            return Err(server("bad file name"));
+        }
+        let path = media_dir.join(sha256);
+        if path.exists() {
+            return Ok(path);
+        }
+        let resp = self
+            .media_agent()
+            .get(format!("{}/v1/media/{sha256}", self.base))
+            .header("authorization", bearer(token))
+            .header("x-edge-client", app_id())
+            .call();
+        let mut resp = match resp {
+            Ok(r) if r.status().as_u16() == 200 => r,
+            other => {
+                read::<serde::de::IgnoredAny>(other)?;
+                return Err(server("not uploaded yet"));
+            }
+        };
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(crate::attachment::MAX_ATTACHMENT_BYTES)
+            .read_to_vec()
+            .map_err(|e| ClientError::Offline(e.to_string()))?;
+        let (got, _) =
+            crate::attachment::store_file(media_dir, &bytes).map_err(|e| server(&e.to_string()))?;
+        if got != sha256 {
+            let _ = std::fs::remove_file(media_dir.join(&got));
+            return Err(server("downloaded file does not match"));
+        }
+        Ok(path)
+    }
+
+    /// Big files need longer than the 30 s the sync requests get.
+    fn media_agent(&self) -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(600)))
+            .http_status_as_error(false)
+            .build()
+            .into()
+    }
+
     fn post<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,

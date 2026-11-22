@@ -27,6 +27,13 @@ pub struct Note {
     /// Set when this note is a saved post (a save). Absent in notes from before saves existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<Link>,
+    /// Images and voice recordings, removed ones included as tombstones. Absent in older notes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::Attachment>,
+    /// Where a pinned note's tab sits on the edge, smallest first (set when pinned, changed by
+    /// dragging). None in older notes: they sort by when they were made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_order: Option<i64>,
     /// Fields from a newer version of Edge that this version does not know. Kept and sent back
     /// unchanged, so an older app or server never strips what a newer one wrote.
     #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
