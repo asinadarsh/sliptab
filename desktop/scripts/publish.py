@@ -7,7 +7,7 @@
 
 Uploads every installer and update package found in dist-dir (as laid out by the desktop-build
 workflow), then writes latest.json (the Tauri updater manifest) last, so apps never see a
-manifest pointing at files that are not there yet. Needs EDGE_ADMIN_TOKEN.
+manifest pointing at files that are not there yet. Needs EDGE_PUBLISH_TOKEN.
 """
 import datetime
 import json
@@ -29,7 +29,7 @@ def put(name: str, data: bytes) -> None:
         f"{SERVER}/v1/admin/releases/{name}",
         data=data,
         method="PUT",
-        headers={"Authorization": f"Bearer {os.environ['EDGE_ADMIN_TOKEN']}"},
+        headers={"Authorization": f"Bearer {os.environ['EDGE_PUBLISH_TOKEN']}"},
     )
     with urllib.request.urlopen(req, timeout=300) as r:
         assert r.status == 204, (name, r.status)

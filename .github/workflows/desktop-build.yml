@@ -77,5 +77,5 @@ jobs:
           path: dist
       - name: Upload installers and latest.json to the sync server
         env:
-          EDGE_ADMIN_TOKEN: ${{ secrets.EDGE_ADMIN_TOKEN }}
+          EDGE_PUBLISH_TOKEN: ${{ secrets.EDGE_PUBLISH_TOKEN }}
         run: python3 desktop/scripts/publish.py "${GITHUB_REF_NAME#v}" dist

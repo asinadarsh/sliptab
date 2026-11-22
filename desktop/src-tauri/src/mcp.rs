@@ -58,7 +58,11 @@ pub fn serve() {
         let reply = match serde_json::from_str::<Value>(&line) {
             Ok(msg) => {
                 note_use(&dir, &msg, &mut client);
-                handle(&msg, &mut store, settings::load(&dir).mcp_access)
+                let plan = Plan {
+                    access: settings::load(&dir).mcp_access,
+                    subscribed: crate::sync::subscribed(&dir),
+                };
+                handle(&msg, &mut store, plan)
             }
             Err(e) => Some(
                 json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": e.to_string()}}),
@@ -93,7 +97,15 @@ fn note_use(dir: &std::path::Path, msg: &Value, client: &mut String) {
 }
 
 /// One JSON-RPC message in, at most one reply out (notifications get none).
-fn handle(msg: &Value, store: &mut Store, access: McpAccess) -> Option<Value> {
+/// What the user allows (their choice) and has (signed in with a trial or subscription).
+#[derive(Clone, Copy)]
+struct Plan {
+    access: McpAccess,
+    subscribed: bool,
+}
+
+fn handle(msg: &Value, store: &mut Store, plan: Plan) -> Option<Value> {
+    let access = plan.access;
     let id = msg.get("id")?.clone(); // no id: a notification
     let ok = |result: Value| Some(json!({"jsonrpc": "2.0", "id": id, "result": result}));
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -112,7 +124,7 @@ fn handle(msg: &Value, store: &mut Store, access: McpAccess) -> Option<Value> {
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            let (text, is_error) = match call(name, &args, store, access) {
+            let (text, is_error) = match call(name, &args, store, access, plan.subscribed) {
                 Ok(v) => (v, false),
                 Err(e) => (e, true),
             };
@@ -192,11 +204,24 @@ fn tools(access: McpAccess) -> Vec<Value> {
         .collect()
 }
 
-fn call(name: &str, a: &Value, store: &mut Store, access: McpAccess) -> Result<String, String> {
+fn call(
+    name: &str,
+    a: &Value,
+    store: &mut Store,
+    access: McpAccess,
+    subscribed: bool,
+) -> Result<String, String> {
     let need = level(name);
     if access == McpAccess::Off {
         return Err(
             "Sliptab's AI access is off. Ask the user to turn it on in Sliptab → AI agents.".into(),
+        );
+    }
+    if !subscribed {
+        return Err(
+            "AI agents are part of Sliptab's subscription: the user needs to sign in to sync in \
+                    Sliptab (30 days free) or subscribe. Their notes are untouched."
+                .into(),
         );
     }
     if need > access {
@@ -438,7 +463,10 @@ mod tests {
         handle(
             &json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
             store,
-            access,
+            Plan {
+                access,
+                subscribed: true,
+            },
         )
         .unwrap()
     }
@@ -530,9 +558,24 @@ mod tests {
         assert!(handle(
             &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
             &mut s,
-            McpAccess::Read
+            Plan {
+                access: McpAccess::Read,
+                subscribed: true
+            }
         )
         .is_none());
+        // Without a trial or subscription, every tool explains instead of working.
+        let lapsed = Plan {
+            access: McpAccess::Full,
+            subscribed: false,
+        };
+        let call = json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "list_notes"}});
+        let r = handle(&call, &mut s, lapsed).unwrap();
+        assert_eq!(r["result"]["isError"], true);
+        assert!(r["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("subscription"));
         let init = rpc(
             &mut s,
             McpAccess::Read,

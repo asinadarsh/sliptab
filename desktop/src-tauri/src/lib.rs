@@ -136,7 +136,14 @@ fn mcp_info(app: tauri::AppHandle) -> CmdResult<serde_json::Value> {
         .ok()
         .and_then(|d| std::fs::read_to_string(d.join(mcp::LAST_USE)).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    Ok(serde_json::json!({ "command": exe.to_string_lossy(), "last": last }))
+    let subscribed = app
+        .path()
+        .app_data_dir()
+        .map(|d| sync::subscribed(&d))
+        .unwrap_or(false);
+    Ok(
+        serde_json::json!({ "command": exe.to_string_lossy(), "last": last, "subscribed": subscribed }),
+    )
 }
 
 /// Notes changed by another process (the MCP server an agent runs): reload the lists and sync.

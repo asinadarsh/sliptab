@@ -26,6 +26,28 @@ struct Account {
     /// In the beta (Saved posts). Refreshed from /v1/me now and then.
     #[serde(default)]
     beta: bool,
+    /// When the trial ends and until when it is paid (ms), from /v1/me: AI agents (MCP) are part
+    /// of the subscription, and the MCP server checks these offline. None in older files.
+    #[serde(default)]
+    trial_ends_at: Option<i64>,
+    #[serde(default)]
+    paid_until: Option<i64>,
+}
+
+/// Signed in with a running trial or subscription (what sync and AI agents need), from the
+/// account file in `dir`. Used by the MCP server, which runs without the app.
+pub fn subscribed(dir: &Path) -> bool {
+    let Some(a) = std::fs::read_to_string(dir.join("account.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Account>(&s).ok())
+    else {
+        return false;
+    };
+    let now = now_ms();
+    match (a.trial_ends_at, a.paid_until) {
+        (None, None) => true, // from before these were stored: the next refresh fills them in
+        (t, p) => t.unwrap_or(0) > now || p.unwrap_or(0) > now,
+    }
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -189,11 +211,16 @@ fn refresh_beta(st: &SyncState, account: &Account, status: &mut Status) {
         return;
     };
     status.beta = me.beta;
-    if me.beta != account.beta {
+    if me.beta != account.beta
+        || account.trial_ends_at != Some(me.trial_ends_at)
+        || account.paid_until != me.paid_until
+    {
         let updated = Account {
             email: account.email.clone(),
             token: account.token.clone(),
             beta: me.beta,
+            trial_ends_at: Some(me.trial_ends_at),
+            paid_until: me.paid_until,
         };
         if let Ok(json) = serde_json::to_string(&updated) {
             let _ = write_private(&st.account_path(), &json);
@@ -253,12 +280,15 @@ pub async fn sync_sign_in_google(app: AppHandle) -> CmdResult<Status> {
         Ok((me, token))
     })
     .await?;
+    let (trial_ends_at, paid_until) = (Some(email.trial_ends_at), email.paid_until);
     let (email, beta) = (email.email, email.beta);
     let st = app.state::<SyncState>();
     let json = serde_json::to_string(&Account {
         email: email.clone(),
         token,
         beta,
+        trial_ends_at,
+        paid_until,
     })
     .map_err(|e| e.to_string())?;
     write_private(&st.account_path(), &json).map_err(|e| e.to_string())?;

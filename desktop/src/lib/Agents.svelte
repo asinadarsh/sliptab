@@ -10,10 +10,12 @@
 
   let command = $state("");
   let last: { client: string; tool: string; at: number } | null = $state(null);
+  let subscribed = $state(true);
   async function load() {
-    const info = await invoke<{ command: string; last: typeof last }>("mcp_info");
+    const info = await invoke<{ command: string; last: typeof last; subscribed: boolean }>("mcp_info");
     command = info.command;
     last = info.last;
+    subscribed = info.subscribed;
   }
   $effect(() => {
     void load();
@@ -72,6 +74,10 @@
     <p>Let your AI agent read and update your notes. Stays on this computer.</p>
   </header>
 
+  {#if !subscribed}
+    <div class="plan">AI agents come with sync. Sign in under Settings → Sync to start your 30 free days.</div>
+  {/if}
+
   <section>
     <div class="label">Access</div>
     <div class="seg" role="radiogroup" aria-label="Agent access">
@@ -125,6 +131,13 @@
     margin: 6px 0 0;
     color: var(--muted);
     font-size: 13.5px;
+  }
+  .plan {
+    padding: 11px 14px;
+    border-radius: 12px;
+    font-size: 13px;
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   .label {
     font-size: 11px;
