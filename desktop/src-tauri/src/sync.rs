@@ -136,8 +136,9 @@ fn listen(app: AppHandle) {
 fn run(app: &AppHandle) {
     let st = app.state::<SyncState>();
     let notes = app.state::<Notes>();
-    // New saves first, so they go up with their details in this same sync. Works signed out too.
-    if notes_core::client::fill_details(&notes.0, 20) > 0 {
+    // A few new saves get their details first (they go up with them); a few at a time, so slow
+    // pages never hold a typed note back for long. The rest follow next round. Signed out too.
+    if notes_core::client::fill_details(&notes.0, 3) > 0 {
         let _ = app.emit(SAVES_EVENT, ());
     }
     let Some(account) = st.account() else { return };
@@ -315,19 +316,7 @@ pub async fn sync_delete_account(app: AppHandle) -> CmdResult<Status> {
 #[tauri::command]
 pub async fn media_get(app: AppHandle, sha256: String) -> CmdResult<tauri::ipc::Response> {
     blocking(move || {
-        let st = app.state::<SyncState>();
-        let dir = st.media_dir();
-        let local = dir.join(&sha256);
-        let path = if local.exists() && sha256.len() == 64 {
-            local
-        } else {
-            let account = st
-                .account()
-                .ok_or("Sign in to sync to see this file here.")?;
-            Client::new(SERVER)
-                .media_file(&account.token, &dir, &sha256)
-                .map_err(|e| e.to_string())?
-        };
+        let path = local_media(&app, &sha256)?;
         std::fs::read(path)
             .map(tauri::ipc::Response::new)
             .map_err(|e| e.to_string())
@@ -337,12 +326,13 @@ pub async fn media_get(app: AppHandle, sha256: String) -> CmdResult<tauri::ipc::
 
 /// The local path of attachment `sha256`, downloading it first when this device lacks it.
 fn local_media(app: &AppHandle, sha256: &str) -> CmdResult<PathBuf> {
+    // A name, never a path: 64 hex characters, so nothing from the page can reach other files.
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("not an attachment".into());
+    }
     let st = app.state::<SyncState>();
     let dir = st.media_dir();
-    if sha256.len() == 64
-        && sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        && dir.join(sha256).exists()
-    {
+    if dir.join(sha256).exists() {
         return Ok(dir.join(sha256));
     }
     let account = st
@@ -448,23 +438,10 @@ pub async fn media_copy_image(app: AppHandle, sha256: String) -> CmdResult<()> {
 #[tauri::command]
 pub async fn media_open(app: AppHandle, sha256: String, name: String) -> CmdResult<()> {
     blocking(move || {
-        let st = app.state::<SyncState>();
-        let dir = st.media_dir();
-        let src = if dir.join(&sha256).exists() && sha256.len() == 64 {
-            dir.join(&sha256)
-        } else {
-            let account = st
-                .account()
-                .ok_or("Sign in to sync to see this file here.")?;
-            Client::new(SERVER)
-                .media_file(&account.token, &dir, &sha256)
-                .map_err(|e| e.to_string())?
-        };
+        let src = local_media(&app, &sha256)?;
         let name = safe_name(&name);
-        if runnable(&name) {
-            return Err(
-                "This kind of file could run a program, so Sliptab does not open it.".into(),
-            );
+        if !openable(&name) {
+            return Err("Sliptab opens documents, images and media only. Use Save to Downloads for this file.".into());
         }
         let out = app
             .path()
@@ -488,7 +465,11 @@ fn safe_name(name: &str) -> String {
         .filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c))
         .take(120)
         .collect();
-    let clean = clean.trim().trim_start_matches('.').to_owned();
+    let clean = clean
+        .trim()
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .to_owned();
     if clean.is_empty() {
         "file".into()
     } else {
@@ -496,44 +477,65 @@ fn safe_name(name: &str) -> String {
     }
 }
 
-/// Extensions that run code when opened (Linux launchers, Windows programs and scripts).
-fn runnable(name: &str) -> bool {
+/// Files Sliptab opens in their app: documents, images, audio and video, by extension. An
+/// allowlist, because every OS has file types that run code (and new ones keep appearing);
+/// anything else can still be saved to Downloads.
+fn openable(name: &str) -> bool {
     let ext = name
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default();
     matches!(
         ext.as_str(),
-        "desktop"
-            | "sh"
-            | "bash"
-            | "run"
-            | "bin"
-            | "appimage"
-            | "deb"
-            | "rpm"
-            | "py"
-            | "pl"
-            | "jar"
-            | "exe"
-            | "msi"
-            | "bat"
-            | "cmd"
-            | "com"
-            | "scr"
-            | "ps1"
-            | "vbs"
-            | "vbe"
-            | "js"
-            | "jse"
-            | "wsf"
-            | "lnk"
-            | "hta"
-            | "cpl"
-            | "reg"
-            | "pif"
-            | "app"
-            | "command"
+        "pdf"
+            | "txt"
+            | "md"
+            | "csv"
+            | "tsv"
+            | "rtf"
+            | "json"
+            | "log"
+            | "doc"
+            | "docx"
+            | "xls"
+            | "xlsx"
+            | "ppt"
+            | "pptx"
+            | "odt"
+            | "ods"
+            | "odp"
+            | "pages"
+            | "numbers"
+            | "key"
+            | "epub"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "heic"
+            | "heif"
+            | "bmp"
+            | "tif"
+            | "tiff"
+            | "avif"
+            | "mp3"
+            | "m4a"
+            | "aac"
+            | "wav"
+            | "flac"
+            | "ogg"
+            | "oga"
+            | "opus"
+            | "weba"
+            | "amr"
+            | "mp4"
+            | "m4v"
+            | "mov"
+            | "webm"
+            | "mkv"
+            | "avi"
+            | "zip"
     )
 }
 
@@ -543,8 +545,31 @@ fn opened_files_get_safe_names_and_programs_are_refused() {
     assert_eq!(safe_name("C:\\x\\Report: Q3?.pdf"), "Report Q3.pdf");
     assert_eq!(safe_name(".bashrc"), "bashrc");
     assert_eq!(safe_name(""), "file");
-    assert!(runnable("setup.EXE") && runnable("x.desktop") && runnable("a.sh"));
-    assert!(!runnable("notes.pdf") && !runnable("song.mp3") && !runnable("README"));
+    assert_eq!(safe_name("setup.exe. . "), "setup.exe");
+    for no in [
+        "setup.EXE",
+        "x.desktop",
+        "a.sh",
+        "x.chm",
+        "a.url",
+        "b.msc",
+        "c.terminal",
+        "d.svg",
+        "e.html",
+        "README",
+        "setup.exe.",
+    ] {
+        assert!(!openable(&safe_name(no)), "{no}");
+    }
+    for yes in [
+        "notes.pdf",
+        "song.mp3",
+        "Photo.HEIC",
+        "plan.docx",
+        "voice.m4a",
+    ] {
+        assert!(openable(yes), "{yes}");
+    }
 }
 
 #[tauri::command]

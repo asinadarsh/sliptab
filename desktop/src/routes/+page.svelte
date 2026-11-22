@@ -4,7 +4,7 @@
   import { onMount, tick } from "svelte";
   import { createEdge, type Mode, type Reason } from "$lib/hover";
   import { captureHotkey, formatHotkey } from "$lib/accel";
-  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, type Note, type Attachment, liveAttachments, isOnlyLink, platformName, saveTitle, PLATFORMS } from "$lib/notes";
+  import { ago, checklistItems, edgeTabs, nextColor, PALETTE, sections as toSections, onOpenNoteChanged, type Note, type Attachment, liveAttachments, isOnlyLink, platformName, saveTitle, PLATFORMS } from "$lib/notes";
   import Cards from "$lib/views/Cards.svelte";
   import Compact from "$lib/views/Compact.svelte";
   import Sticky from "$lib/views/Sticky.svelte";
@@ -344,6 +344,7 @@
     unseen = new Set(await invoke<string[]>("pins_unseen"));
     notes = query.trim() && tab === "notes" ? await invoke<Note[]>("notes_search", { query }) : all;
     allSaves = await invoke<Note[]>("saves_list");
+    followOpenNote();
     found = query.trim() && tab === "saved" ? await invoke<Note[]>("saves_search", { query }) : allSaves;
     [folders, defaultFolders] = await invoke<[[string, number][], string[]]>("save_folders");
     const midnight = new Date();
@@ -380,6 +381,23 @@
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(flushSave, 500);
+  }
+
+  /** The open note was changed elsewhere (sync, an agent, the other window): show the new text
+   *  unless you are typing, in which case your text is saved as the newer edit. */
+  function followOpenNote() {
+    const open = editing;
+    if (!open || saveTimer) return; // typing right now: the save below makes the newer edit
+    const latest = [...all, ...allSaves].find((n) => n.id === open.id);
+    switch (onOpenNoteChanged(open, latest, draft)) {
+      case "load":
+        editing = latest!;
+        draft = latest!.body;
+        break;
+      case "closed":
+        editing = null;
+        break;
+    }
   }
 
   async function flushSave() {

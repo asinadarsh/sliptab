@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { attachSummary, checklistItems, edgeTabs, isOnlyLink, nextColor, PALETTE, preview, progress, saveTitle, sections, type Note } from "./notes.ts";
+import { attachSummary, onOpenNoteChanged, checklistItems, edgeTabs, isOnlyLink, nextColor, PALETTE, preview, progress, saveTitle, sections, type Note } from "./notes.ts";
 
 let t = 0;
 const note = (body: string, extra: Partial<Note> = {}): Note => ({
@@ -82,4 +82,14 @@ test("pinned tabs follow pin order, older notes by creation", () => {
   const n = (id: string, created_at: number, pin_order: number | null) => ({ ...note(id), id, pinned: true, created_at, pin_order });
   const { tabs } = edgeTabs([n("late", 5, 300), n("old", 1, null), n("first", 9, 100)]);
   assert.deepEqual(tabs.map((t) => t.id), ["old", "first", "late"]);
+});
+
+test("the open note follows changes made elsewhere unless you are typing", () => {
+  const open = { ...note("a"), body: "milk", updated_at: 1 };
+  const newer = { ...open, body: "milk, eggs", updated_at: 2 };
+  assert.equal(onOpenNoteChanged(open, open, "milk"), "keep");
+  assert.equal(onOpenNoteChanged(open, newer, "milk"), "load");
+  assert.equal(onOpenNoteChanged(open, newer, "milk!"), "mine");
+  assert.equal(onOpenNoteChanged(open, undefined, "milk"), "closed");
+  assert.equal(onOpenNoteChanged(open, undefined, "milk!"), "mine");
 });

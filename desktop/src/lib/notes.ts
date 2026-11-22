@@ -161,3 +161,20 @@ export function attachSummary(n: Note): string {
   const [i, v, f] = [count("image"), count("audio"), count("file")];
   return [i && `${i} image${i > 1 ? "s" : ""}`, v && `${v} audio`, f && `${f} file${f > 1 ? "s" : ""}`].filter(Boolean).join(" · ");
 }
+
+/**
+ * The open note changed in the store (a sync, an AI agent, the other window). What the editor
+ * does: "keep" (nothing new), "load" (take the new text: nothing typed since the last save),
+ * "closed" (deleted elsewhere and nothing typed), or "mine" (unsaved typing: keep it; saving it
+ * makes a newer edit, which sync merges and, if both rewrote the text, keeps both).
+ */
+export function onOpenNoteChanged(
+  open: Note,
+  latest: Note | undefined,
+  draft: string,
+): "keep" | "load" | "closed" | "mine" {
+  const typed = draft !== open.body;
+  if (!latest) return typed ? "mine" : "closed";
+  if (latest.updated_at === open.updated_at && latest.body === open.body) return "keep";
+  return typed ? "mine" : "load";
+}
