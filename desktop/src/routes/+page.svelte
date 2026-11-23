@@ -12,6 +12,8 @@
   import RichEditor from "$lib/RichEditor.svelte";
   import Attachments from "$lib/Attachments.svelte";
   import Agents from "$lib/Agents.svelte";
+  import Licenses from "$lib/Licenses.svelte";
+  import { getVersion } from "@tauri-apps/api/app";
   import { plain } from "$lib/format";
   import "@fontsource-variable/figtree";
   import "@fontsource/instrument-serif/400.css";
@@ -41,6 +43,9 @@
   let tab: "notes" | "saved" = $state("notes");
   /** The app window's Agents page (MCP access for AI agents). */
   let agentsOpen = $state(false);
+  let licensesOpen = $state(false);
+  let appVersion = $state("");
+  void getVersion().then((v) => (appVersion = v));
   let allSaves: Note[] = $state([]);
   let found: Note[] = $state([]); // saves matching the search
   let folders: [string, number][] = $state([]);
@@ -768,6 +773,7 @@
   };
 
   async function openSettings() {
+    licensesOpen = false;
     settingsOpen = true;
     hotkeyMsg = "";
     settingsMsg = "";
@@ -1153,6 +1159,13 @@
 
     {#if agentsOpen && !settingsOpen && standalone}
       <Agents access={cfg.mcpAccess} onaccess={(a) => saveSettings({ mcpAccess: a })} />
+    {:else if settingsOpen && licensesOpen}
+      <header class="top">
+        <button class="ib" onclick={() => (licensesOpen = false)} aria-label="Back to settings"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <h1 class="grow">Open-source licences</h1>
+        {@render closeButtons()}
+      </header>
+      <Licenses />
     {:else if settingsOpen}
       <header class="top">
         <button class="ib" onclick={() => (settingsOpen = false)} aria-label="Back to notes"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
@@ -1286,6 +1299,12 @@
           <input type="checkbox" checked={!!autostart} disabled={autostart === null} onchange={toggleAutostart} aria-label="Start on login" />
         </section>
         {#if settingsMsg}<p class="error pad" role="status">{settingsMsg}</p>{/if}
+
+        <div class="group">About</div>
+        <section class="setting">
+          <div class="grow"><div>Sliptab {appVersion}</div><div class="sub">Open-source packages Sliptab is built with</div></div>
+          <button class="pill" onclick={() => (licensesOpen = true)}>Licences</button>
+        </section>
       </div>
     {:else if editing}
       <header class="top">
