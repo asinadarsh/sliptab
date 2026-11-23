@@ -32,6 +32,8 @@ struct Account {
     trial_ends_at: Option<i64>,
     #[serde(default)]
     paid_until: Option<i64>,
+    #[serde(default)]
+    billing: bool,
 }
 
 /// Signed in with a running trial or subscription (what sync and AI agents need), from the
@@ -60,6 +62,23 @@ pub struct Status {
     received: usize,
     /// The account is in the beta: show Saved posts. False when signed out.
     beta: bool,
+    /// The plan, for Settings → Sync: trial end and paid-until (ms), and whether Subscribe can
+    /// be offered (the server sells subscriptions).
+    trial_ends_at: Option<i64>,
+    paid_until: Option<i64>,
+    billing: bool,
+}
+
+/// When the account was last re-read from the server; 0 makes the next sync re-read it (after a
+/// checkout, so a new subscription shows within a minute).
+static LAST_ME: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+impl Status {
+    fn plan(mut self, a: &Account) -> Self {
+        (self.trial_ends_at, self.paid_until, self.billing) =
+            (a.trial_ends_at, a.paid_until, a.billing);
+        self
+    }
 }
 
 pub struct SyncState {
@@ -107,6 +126,9 @@ pub fn start(app: &AppHandle, dir: &Path) {
         let mut status = state.status.lock().unwrap();
         status.email = state.account().map(|a| a.email);
         status.beta = state.account().is_some_and(|a| a.beta);
+        if let Some(a) = state.account() {
+            *status = std::mem::take(&mut *status).plan(&a);
+        }
     }
     app.manage(state);
     app.state::<SyncState>().kick(true); // first sync right after start-up
@@ -201,30 +223,27 @@ fn run(app: &AppHandle) {
 /// Re-reads the beta flag from the server at most every 10 minutes, so a newly granted beta
 /// shows up without signing in again.
 fn refresh_beta(st: &SyncState, account: &Account, status: &mut Status) {
-    static LAST: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    *status = std::mem::take(status).plan(account);
     let now = now_ms();
-    if now - LAST.load(std::sync::atomic::Ordering::Relaxed) < 600_000 {
+    if now - LAST_ME.load(std::sync::atomic::Ordering::Relaxed) < 600_000 {
         return;
     }
-    LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+    LAST_ME.store(now, std::sync::atomic::Ordering::Relaxed);
     let Ok(me) = Client::new(SERVER).me(&account.token) else {
         return;
     };
     status.beta = me.beta;
-    if me.beta != account.beta
-        || account.trial_ends_at != Some(me.trial_ends_at)
-        || account.paid_until != me.paid_until
-    {
-        let updated = Account {
-            email: account.email.clone(),
-            token: account.token.clone(),
-            beta: me.beta,
-            trial_ends_at: Some(me.trial_ends_at),
-            paid_until: me.paid_until,
-        };
-        if let Ok(json) = serde_json::to_string(&updated) {
-            let _ = write_private(&st.account_path(), &json);
-        }
+    let updated = Account {
+        email: account.email.clone(),
+        token: account.token.clone(),
+        beta: me.beta,
+        trial_ends_at: Some(me.trial_ends_at),
+        paid_until: me.paid_until,
+        billing: me.billing,
+    };
+    *status = std::mem::take(status).plan(&updated);
+    if let Ok(json) = serde_json::to_string(&updated) {
+        let _ = write_private(&st.account_path(), &json);
     }
 }
 
@@ -280,7 +299,8 @@ pub async fn sync_sign_in_google(app: AppHandle) -> CmdResult<Status> {
         Ok((me, token))
     })
     .await?;
-    let (trial_ends_at, paid_until) = (Some(email.trial_ends_at), email.paid_until);
+    let (trial_ends_at, paid_until, billing) =
+        (Some(email.trial_ends_at), email.paid_until, email.billing);
     let (email, beta) = (email.email, email.beta);
     let st = app.state::<SyncState>();
     let json = serde_json::to_string(&Account {
@@ -289,12 +309,16 @@ pub async fn sync_sign_in_google(app: AppHandle) -> CmdResult<Status> {
         beta,
         trial_ends_at,
         paid_until,
+        billing,
     })
     .map_err(|e| e.to_string())?;
     write_private(&st.account_path(), &json).map_err(|e| e.to_string())?;
     let status = Status {
         email: Some(email),
         beta,
+        trial_ends_at,
+        paid_until,
+        billing,
         ..Status::default()
     };
     *st.status.lock().map_err(|e| e.to_string())? = status.clone();
@@ -600,6 +624,34 @@ fn opened_files_get_safe_names_and_programs_are_refused() {
     ] {
         assert!(openable(yes), "{yes}");
     }
+}
+
+/// Opens the checkout for a subscription ("monthly" or "yearly") in the browser.
+#[tauri::command]
+pub async fn billing_checkout(app: AppHandle, plan: String) -> CmdResult<()> {
+    blocking(move || {
+        let account = app.state::<SyncState>().account().ok_or("Sign in first.")?;
+        let url = Client::new(SERVER)
+            .checkout_url(&account.token, &plan)
+            .map_err(|e| e.to_string())?;
+        LAST_ME.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::google::open_browser(&url)
+    })
+    .await
+}
+
+/// Opens the payment provider's page to change or cancel the subscription.
+#[tauri::command]
+pub async fn billing_portal(app: AppHandle) -> CmdResult<()> {
+    blocking(move || {
+        let account = app.state::<SyncState>().account().ok_or("Sign in first.")?;
+        let url = Client::new(SERVER)
+            .portal_url(&account.token)
+            .map_err(|e| e.to_string())?;
+        LAST_ME.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::google::open_browser(&url)
+    })
+    .await
 }
 
 #[tauri::command]

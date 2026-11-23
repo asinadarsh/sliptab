@@ -105,10 +105,30 @@
   let settingsMsg = $state("");
 
   // ---- sync (runs in Rust; the page shows its status and does sign-in)
-  type SyncStatus = { email: string | null; lastSyncedAt: number | null; error: string | null; received: number; beta: boolean };
-  let sync: SyncStatus = $state({ email: null, lastSyncedAt: null, error: null, received: 0, beta: false });
-  /** Saved posts are a beta feature: shown only to beta accounts (the server says which). */
-  const savesOn = $derived(sync.beta);
+  type SyncStatus = {
+    email: string | null; lastSyncedAt: number | null; error: string | null; received: number; beta: boolean;
+    trialEndsAt: number | null; paidUntil: number | null; billing: boolean;
+  };
+  let sync: SyncStatus = $state({ email: null, lastSyncedAt: null, error: null, received: 0, beta: false, trialEndsAt: null, paidUntil: null, billing: false });
+  /** Saved posts: for everyone since v1. */
+  const savesOn = true;
+  /** Settings → Sync: the plan in one line, e.g. "Free trial · 23 days left". */
+  const plan = $derived.by(() => {
+    const now = Date.now();
+    const days = (t: number) => Math.max(1, Math.ceil((t - now) / 86_400_000));
+    if (sync.paidUntil && sync.paidUntil > now) return { paid: true, text: `Subscribed · renews or ends in ${days(sync.paidUntil)} days` };
+    if (sync.trialEndsAt && sync.trialEndsAt > now) return { paid: false, text: `Free trial · ${days(sync.trialEndsAt)} days left` };
+    return { paid: false, text: "Trial ended · sync and AI agents are paused, notes stay here" };
+  });
+  async function billing(kind: "monthly" | "yearly" | "portal") {
+    syncMsg = "";
+    try {
+      await (kind === "portal" ? invoke("billing_portal") : invoke("billing_checkout", { plan: kind }));
+      syncMsg = kind === "portal" ? "" : "Finish in your browser; sync turns on within a minute.";
+    } catch (e) {
+      syncMsg = `${e}`;
+    }
+  }
   /** The server refuses this version (426): the updater runs; say so. */
   const tooOld = $derived(!!sync.error && sync.error.includes("too old"));
   $effect(() => {
@@ -324,6 +344,12 @@
       void refresh();
     } else {
       hoverTab = null;
+      // A dialog or menu left open would stay drawn over the desktop after the panel closes
+      // (the window keeps a dialog-sized hit area), and no click outside reaches it: cancel them.
+      if (asking) answer(null);
+      menu = null;
+      textMenu = null;
+      attachMenu = false;
       (document.activeElement as HTMLElement | null)?.blur(); // never type into a hidden panel
       shown = false;
       void flushSave();
@@ -1132,6 +1158,15 @@
             <button class="pill" disabled={syncBusy} onclick={() => invoke("sync_now")}>Sync now</button>
           </section>
           {#if sync.error}<p class="error pad">{sync.error}</p>{/if}
+          <section class="setting">
+            <div class="grow"><div>Plan</div><div class="sub">{plan.text}</div></div>
+            {#if plan.paid}
+              <button class="pill" onclick={() => billing("portal")}>Manage</button>
+            {:else if sync.billing}
+              <button class="pill" onclick={() => billing("monthly")}>Monthly</button>
+              <button class="pill" onclick={() => billing("yearly")}>Yearly</button>
+            {/if}
+          </section>
           <section class="setting">
             <div class="grow sub">Notes stay on this laptop if you sign out.</div>
             <button class="pill" disabled={syncBusy} onclick={signOutSync}>Sign out</button>

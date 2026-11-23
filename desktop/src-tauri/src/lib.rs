@@ -679,6 +679,8 @@ pub fn run() {
             pin_seen,
             note_detach,
             sync::media_get,
+            sync::billing_checkout,
+            sync::billing_portal,
             sync::media_open,
             sync::media_save,
             sync::media_copy_image,
