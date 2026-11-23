@@ -73,6 +73,12 @@ pub struct Me {
     /// In the beta: show Saved posts. Absent from older servers, so false.
     #[serde(default)]
     pub beta: bool,
+    /// A subscription pays right now (not only the trial).
+    #[serde(default)]
+    pub subscribed: bool,
+    /// The server sells subscriptions: show Subscribe.
+    #[serde(default)]
+    pub billing: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -192,6 +198,31 @@ impl Client {
             ))
             .call();
         read(resp)?.ok_or_else(|| server("empty answer"))
+    }
+
+    /// A checkout page for a subscription ("monthly" or "yearly"), to open in the browser.
+    pub fn checkout_url(&self, token: &str, plan: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Url {
+            url: String,
+        }
+        let body = serde_json::json!({ "plan": plan });
+        Ok(self
+            .post::<Url>("/v1/billing/checkout", Some(token), &body)?
+            .ok_or_else(|| server("empty answer"))?
+            .url)
+    }
+
+    /// The payment provider's page to change or cancel the subscription.
+    pub fn portal_url(&self, token: &str) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Url {
+            url: String,
+        }
+        Ok(self
+            .post::<Url>("/v1/billing/portal", Some(token), &serde_json::json!({}))?
+            .ok_or_else(|| server("empty answer"))?
+            .url)
     }
 
     /// Deletes the account and everything synced to it. Local notes on this device stay.
