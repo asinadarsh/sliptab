@@ -2080,6 +2080,7 @@
   }
   .search {
     flex: 1;
+    min-width: 0; /* shrink with the panel: an input's own width overflowed a narrow header */
     display: flex;
     align-items: center;
     gap: 8px;
