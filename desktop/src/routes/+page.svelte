@@ -185,7 +185,7 @@
   let nativeCrossings = false;
   let nativeInside = false;
   // The app's text menu (right-click in the editor, search or quick box).
-  let textMenu: { x: number; y: number; field: HTMLElement } | null = $state(null);
+  let textMenu: { x: number; y: number; field: HTMLElement; href?: string } | null = $state(null);
   const inEditor = (f: HTMLElement) => f.isContentEditable;
   async function clipWrite(text: string) {
     try {
@@ -234,7 +234,12 @@
     }
   }
   /** Leaving the window closes the panel. */
+  // Hold: the panel stays open while you work elsewhere (pointer away, another app focused).
+  // Only Escape, the × button, the hotkey or turning hold off closes it. Not saved: every new
+  // session starts with the panel behaving normally.
+  let held = $state(false);
   function leave() {
+    if (held) return;
     edge.pointerLeave();
   }
 
@@ -344,6 +349,7 @@
       void refresh();
     } else {
       hoverTab = null;
+      held = false;
       // A dialog or menu left open would stay drawn over the desktop after the panel closes
       // (the window keeps a dialog-sized hit area), and no click outside reaches it: cancel them.
       if (asking) answer(null);
@@ -875,7 +881,7 @@
       if (field) {
         e.preventDefault();
         menu = null;
-        textMenu = { x: e.clientX, y: e.clientY, field };
+        textMenu = { x: e.clientX, y: e.clientY, field, href: t.closest<HTMLElement>("[data-href]")?.dataset.href };
         return;
       }
       e.preventDefault();
@@ -914,7 +920,7 @@
       }
     });
     window.addEventListener("blur", () => {
-      if (edge.mode === "expanded" && !standalone) edge.escape();
+      if (edge.mode === "expanded" && !standalone && !held) edge.escape();
     });
     void refresh();
   });
@@ -924,6 +930,12 @@
 
 {#snippet closeButtons()}
   {#if !standalone}
+    <button class="ib hold" class:on={held} onclick={() => (held = !held)} aria-pressed={held}
+      aria-label={held ? "Let the panel close again" : "Keep the panel open"}
+      title={held ? "Held open · click to let it close when you leave" : "Keep open while you work elsewhere"}>
+      <!-- A lock (closed when held), not a pin: pin already means "tab on the edge". -->
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/>{#if held}<path d="M8 11V7a4 4 0 0 1 8 0v4"/>{:else}<path d="M8 11V7a4 4 0 0 1 7.5-1.9"/>{/if}</svg>
+    </button>
     <button class="ib" onclick={openHome} aria-label="Open the Sliptab window" title="Open in a window"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></button>
     <button class="ib" onclick={() => edge.escape()} aria-label="Close panel" title="Close"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   {/if}
@@ -1305,7 +1317,7 @@
         {/if}
         <input bind:this={galleryInput} type="file" accept="image/*" multiple hidden onchange={(e) => { const t = e.currentTarget; void attach([...(t.files ?? [])]); t.value = ""; }} />
         <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => { const t = e.currentTarget; void attach([...(t.files ?? [])]); t.value = ""; }} />
-        <span class="fb-hint">Select text, then B / I / U / S · Ctrl+click opens links</span>
+        <span class="fb-hint">Select text, then B / I / U / S · hover a link to open or copy it</span>
       </div>
       {#if attaching}<div class="attaching">{attaching}</div>{/if}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -1384,6 +1396,12 @@
     {@const has = !!fieldSelection(f)}
     <!-- mousedown is cancelled so the field keeps its focus and selection for Cut / Copy. -->
     <div class="ctx" role="menu" tabindex="-1" onmousedown={(e) => e.preventDefault()} style:left="min({textMenu.x}px, calc(100vw - 210px))" style:top="min({textMenu.y}px, calc(100vh - 330px))">
+      {#if textMenu.href}
+        {@const href = textMenu.href}
+        <button role="menuitem" onclick={() => { textMenu = null; void invoke("open_link", { url: href }); }}>Open link</button>
+        <button role="menuitem" onclick={() => { textMenu = null; void clipWrite(href); }}>Copy link</button>
+        <hr />
+      {/if}
       <button role="menuitem" disabled={!has} onclick={() => textAction("cut")}>Cut <kbd>Ctrl X</kbd></button>
       <button role="menuitem" disabled={!has} onclick={() => textAction("copy")}>Copy <kbd>Ctrl C</kbd></button>
       <button role="menuitem" onclick={() => textAction("paste")}>Paste <kbd>Ctrl V</kbd></button>
@@ -1506,12 +1524,19 @@
     border-radius: 2px 0 0 2px;
     background: var(--bar); /* the bar colour from settings */
   }
+  .ib.hold.on {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
   .ask-back {
     position: fixed;
     inset: 0;
     z-index: 70;
     background: rgba(0, 0, 0, 0.35);
     display: grid;
+    grid-template-columns: minmax(0, 320px); /* the track never grows with its content */
+    justify-content: center;
+    align-content: center;
     place-items: center;
     padding: 16px;
   }
@@ -1528,6 +1553,7 @@
   .ask p {
     margin: 0 0 12px;
     line-height: 1.45;
+    overflow-wrap: anywhere; /* a note titled by a long link must not widen the dialog */
   }
   .ask input {
     width: 100%;
@@ -1702,9 +1728,10 @@
   :global(.notes-scroll) {
     /* The bar sits in a gutter outside the cards (the cards keep their width, lined up with the
        box above), so it never draws over them. */
-    margin-right: -16px !important;
-    padding-right: 6px !important; /* + the 10px bar = 16px */
-    scrollbar-gutter: stable; /* the same room with or without a bar */
+    /* WebKitGTK draws overlay scrollbars that take no room: reserve a 12px gutter by padding,
+       pulled back out with a negative margin so the cards stay aligned with the box above. */
+    margin-right: -12px !important;
+    padding-right: 12px !important;
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--text) 14%, transparent) transparent;
   }

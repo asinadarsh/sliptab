@@ -2,6 +2,7 @@
      on every edit it is re-rendered as styled spans and the caret is put back by character offset.
      Markers stay visible, faintly, so text and caret positions are the same as in a textarea. -->
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { format, type Span } from "./format";
   import { enterInItem, removeBox, toggleBox, toggleItemLine, toggleWrap } from "./edit";
 
@@ -38,11 +39,56 @@
   }
 
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  /** Long links show as "site.com/path/…" with the rest hidden (still in the text, at size 0,
+   *  so caret offsets stay exact) except on the line being edited. */
+  const LINK_SHOWN = 42;
   function span(s: Span): string {
     const cls = [s.bold && "b", s.italic && "i", s.underline && "u", s.strike && "s", s.marker && "m", s.href && "lnk"].filter(Boolean).join(" ");
-    const attr = s.href ? ` data-href="${esc(s.href)}" title="Ctrl+click to open"` : "";
-    return cls ? `<span class="${cls}"${attr}>${esc(s.text)}</span>` : esc(s.text);
+    if (s.href) {
+      const attr = ` data-href="${esc(s.href)}"`;
+      if (s.text.length <= LINK_SHOWN) return `<span class="${cls}"${attr}>${esc(s.text)}</span>`;
+      return `<span class="${cls}"${attr}>${esc(s.text.slice(0, LINK_SHOWN))}<span class="lnk-more">${esc(s.text.slice(LINK_SHOWN))}</span></span>`;
+    }
+    return cls ? `<span class="${cls}">${esc(s.text)}</span>` : esc(s.text);
   }
+
+  // A link under the pointer gets a small card: its site, Open and Copy.
+  let linkCard: { href: string; x: number; y: number } | null = $state(null);
+  let cardTimer: ReturnType<typeof setTimeout> | undefined;
+  let copied = $state(false);
+  function onOver(e: MouseEvent) {
+    const a = (e.target as HTMLElement).closest<HTMLElement>("[data-href]");
+    if (!a) return;
+    clearTimeout(cardTimer);
+    const r = a.getBoundingClientRect();
+    const href = a.dataset.href!;
+    if (linkCard?.href === href) return;
+    copied = false;
+    linkCard = { href, x: Math.min(r.left, window.innerWidth - 250), y: r.bottom + 6 };
+  }
+  function onOut(e: MouseEvent) {
+    const to = e.relatedTarget as HTMLElement | null;
+    if (to?.closest("[data-href], .link-card")) return;
+    clearTimeout(cardTimer);
+    cardTimer = setTimeout(() => (linkCard = null), 250);
+  }
+  async function copyLink(href: string) {
+    try {
+      await invoke("clip_write", { text: href });
+    } catch {
+      await navigator.clipboard.writeText(href);
+    }
+    copied = true;
+    setTimeout(() => (linkCard = null), 900);
+  }
+  const site = (href: string) => {
+    try {
+      const u = new URL(href);
+      return u.hostname.replace(/^www\./, "") + (u.pathname.length > 1 ? u.pathname : "");
+    } catch {
+      return href;
+    }
+  };
   /** One <span class="line"> per line (the newline itself stays plain text between them), so the
    *  line with the caret can show its markers while every other line hides them. */
   function html(text: string): string {
@@ -274,7 +320,8 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The link card is a pointer extra; keyboard users have the right-click menu's Open / Copy link. -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
 <div
   class="rich"
   bind:this={el}
@@ -295,6 +342,8 @@
     }
   }}
   onclick={onClick}
+  onmouseover={onOver}
+  onmouseout={onOut}
   onmousedown={onMousedown}
   oncompositionstart={() => (composing = true)}
   oncompositionend={() => {
@@ -303,7 +352,51 @@
   }}
 ></div>
 
+{#if linkCard}
+  {@const c = linkCard}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="link-card" style:left="{c.x}px" style:top="{c.y}px" onmouseleave={() => (linkCard = null)}
+    onmouseenter={() => clearTimeout(cardTimer)} onmousedown={(e) => e.preventDefault()}>
+    <span class="site" title={c.href}>{site(c.href)}</span>
+    <button onclick={() => { onopenlink?.(c.href); linkCard = null; }}>Open</button>
+    <button onclick={() => copyLink(c.href)}>{copied ? "Copied" : "Copy"}</button>
+  </div>
+{/if}
+
 <style>
+  .link-card {
+    position: fixed;
+    z-index: 85;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 240px;
+    padding: 4px 4px 4px 10px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+    font-size: 12px;
+  }
+  .link-card .site {
+    flex: 1;
+    min-width: 0;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .link-card button {
+    all: unset;
+    cursor: pointer;
+    padding: 4px 9px;
+    border-radius: 7px;
+    color: var(--text);
+    background: var(--surface-2);
+  }
+  .link-card button:hover {
+    background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  }
   .rich {
     white-space: pre-wrap;
     word-break: break-word;
@@ -368,10 +461,29 @@
     text-decoration: line-through;
     color: var(--muted);
   }
+  /* Links: accent text with a soft chip behind, so a pasted URL reads as a link, not noise. */
   .rich :global(.lnk) {
     color: var(--accent);
-    text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    text-underline-offset: 3px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-radius: 5px;
+    padding: 1px 3px;
+    text-decoration: none;
+    cursor: pointer;
+    word-break: break-all;
+  }
+  .rich :global(.lnk:hover) {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .rich :global(.lnk-more) {
+    font-size: 0;
+  }
+  .rich :global(.lnk:has(.lnk-more))::after {
+    content: "…";
+  }
+  .rich:focus :global(.line.cur .lnk-more) {
+    font-size: inherit;
+  }
+  .rich:focus :global(.line.cur .lnk:has(.lnk-more))::after {
+    content: none;
   }
 </style>
