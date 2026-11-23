@@ -22,6 +22,17 @@ def note(i, body, pinned=False, color=None, ago=5, order=None):
             "updated_at": NOW - ago * M, "pin_order": order, "attachments": []}
 
 
+# The website's story: Jake needs the venue's number (the launch film), it gets pinned.
+STORY = [
+    note(1, "Venue for Saturday\nThe Courtyard · (415) 555-0142", True, "#ec4899", 1, 0),
+    note(2, "Gate code\n4721#", True, "#f5a524", 40, 1),
+    note(3, "Wi-Fi\nMaple-Guest · sunflower88", True, "#3b82f6", 90, 2),
+    note(4, "Flight UA 482\nSFO to JFK · Fri 7:05 AM · Seat 14C", True, "#22c55e", 200, 3),
+    note(5, "Groceries\n- [x] Oat milk\n- [ ] Avocados\n- [ ] Sourdough\n- [ ] Coffee beans", ago=12),
+    note(6, "Dentist moved to Thursday 3:30 PM\nDr. Patel · (555) 014-2290", ago=48),
+    note(7, "Gift ideas for Sam\nThat ceramic pour-over from the farmers market", ago=300),
+]
+
 NOTES = [
     note(1, "Gate code\n4721#", True, "#f5a524", 3, 0),
     note(2, "Wi-Fi\nMaple-Guest · sunflower88", True, "#3b82f6", 9, 1),
@@ -63,20 +74,27 @@ MOCK = """
 
 def main() -> None:
     out = sys.argv[1]
+    notes = STORY if sys.argv[2:] == ["story"] else NOTES
     with sync_playwright() as p:
         b = p.chromium.launch()
         for theme in ("light", "dark"):
             page = b.new_page(viewport={"width": 480, "height": 860}, device_scale_factor=2,
                               color_scheme=theme)
-            page.add_init_script(MOCK % json.dumps({"notes": NOTES, "theme": theme}))
+            page.add_init_script(MOCK % json.dumps({"notes": notes, "theme": theme}))
             page.on("console", lambda m: m.type == "error" and print("console:", m.text))
             page.goto("http://127.0.0.1:1420/")
             page.wait_for_timeout(1500)
-            page.mouse.move(476, 860 * 0.4)  # onto the bar: the panel slides open on hover
+            tag = f"{theme}-story" if notes is STORY else theme
+            if notes is STORY:
+                page.screenshot(path=f"{out}/strip-{tag}.png", omit_background=True)
+                page.hover(".tab >> nth=0")  # the peek card of the first tab
+                page.wait_for_timeout(600)
+                page.screenshot(path=f"{out}/peek-{tag}.png", omit_background=True)
+            page.hover(".bar")  # the panel slides open on hover
             page.wait_for_timeout(1200)
             page.mouse.move(240, 840)
             page.wait_for_timeout(400)
-            page.screenshot(path=f"{out}/panel-{theme}.png", omit_background=True)
+            page.screenshot(path=f"{out}/panel-{tag}.png", omit_background=True)
             page.close()
         b.close()
 
