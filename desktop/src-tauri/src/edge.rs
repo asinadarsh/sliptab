@@ -251,7 +251,16 @@ fn place_windows(
                 let r = CreateRectRgn(bx, by, bx + b.w as i32, by + b.h as i32);
                 if let Some(p) = peek {
                     let px = |v: f64| (v * scale).round() as i32;
-                    let card = CreateRectRgn(px(p.x), px(p.y), px(p.x + p.w), px(p.y + p.h));
+                    // On Windows the region clips drawing too, not only the pointer: a region the
+                    // card's exact size cut off its shadow and squared its rounded corners. Leave
+                    // room for the shadow (.peek: 0 10px 30px), inside the window.
+                    let pad = px(PEEK_SHADOW);
+                    let card = CreateRectRgn(
+                        (px(p.x) - pad).max(0),
+                        (px(p.y) - pad).max(0),
+                        (px(p.x + p.w) + pad).min(panel.w as i32),
+                        (px(p.y + p.h) + pad + px(10.0)).min(panel.h as i32),
+                    );
                     CombineRgn(r, r, card, RGN_OR);
                     DeleteObject(card);
                 }
@@ -263,6 +272,10 @@ fn place_windows(
     window.show()?;
     Ok(())
 }
+
+/// Room around the peek card for its shadow, in CSS px (the shadow's blur, .peek in +page.svelte).
+#[cfg(windows)]
+const PEEK_SHADOW: f64 = 30.0;
 
 /// The window that had focus before the panel took it, to give focus back on collapse.
 #[cfg(windows)]

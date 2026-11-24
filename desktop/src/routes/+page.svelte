@@ -719,8 +719,9 @@
       void invoke("set_peek", { rect: null }).catch(() => {});
       return;
     }
-    const r = el.getBoundingClientRect();
-    void invoke("set_peek", { rect: { x: r.left, y: r.top, w: r.width, h: r.height } }).catch(() => {});
+    // The layout box, not getBoundingClientRect: the card slides in from 8px to the right, and a
+    // rect taken during that first frame put the Windows region 8px off, cutting the card's edge.
+    void invoke("set_peek", { rect: { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight } }).catch(() => {});
   });
 
   // ---- settings
