@@ -26,6 +26,7 @@
     barPosition: number;
     panelWidth: number | null;
     hoverOpen: boolean;
+    checkUpdates: boolean;
     showBar: boolean;
     theme: "system" | "light" | "dark";
     layout: Layout;
@@ -92,6 +93,7 @@
     barPosition: 0.5,
     panelWidth: null,
     hoverOpen: true,
+    checkUpdates: true,
     showBar: true,
     theme: "system",
     layout: "cards",
@@ -1271,6 +1273,10 @@
         <section class="setting">
           <div class="grow"><div>Show the bar</div><div class="sub">Off: nothing on screen, only the hotkey opens notes.</div></div>
           <input type="checkbox" checked={cfg.showBar} onchange={(e) => saveSettings({ showBar: e.currentTarget.checked })} aria-label="Show the bar" />
+        </section>
+        <section class="setting">
+          <div class="grow"><div>Check for updates</div><div class="sub">Asks sliptab.com every 6 hours, sending only the app version. Off: you update by hand.</div></div>
+          <input type="checkbox" checked={cfg.checkUpdates} onchange={(e) => saveSettings({ checkUpdates: e.currentTarget.checked })} aria-label="Check for updates" />
         </section>
 
         <div class="group">AI agents</div>

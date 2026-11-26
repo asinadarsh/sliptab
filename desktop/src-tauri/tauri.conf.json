@@ -67,7 +67,8 @@
           "English"
         ]
       }
-    }
+    },
+    "licenseFile": "windows/installer-notice.txt"
   },
   "mainBinaryName": "edge",
   "plugins": {

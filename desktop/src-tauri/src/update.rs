@@ -40,6 +40,13 @@ async fn check(app: &AppHandle) {
     if option_env!("SLIPTAB_STORE").is_some() {
         return;
     }
+    // The user turned update checks off in Settings: no request leaves the app.
+    use tauri::Manager;
+    if let Some(s) = app.try_state::<crate::AppSettings>() {
+        if s.current.lock().map(|c| !c.check_updates).unwrap_or(false) {
+            return;
+        }
+    }
     if INSTALLED.load(Ordering::Relaxed) || CHECKING.swap(true, Ordering::Relaxed) {
         return;
     }

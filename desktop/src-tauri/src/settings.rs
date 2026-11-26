@@ -73,6 +73,8 @@ pub struct Settings {
     pub onboarded: bool,
     /// AI agents' access through MCP. Off until the user turns it on.
     pub mcp_access: McpAccess,
+    /// Ask sliptab.com for new versions every 6 hours. The user can turn it off (privacy).
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -89,6 +91,7 @@ impl Default for Settings {
             bar_color: None,
             onboarded: false,
             mcp_access: McpAccess::Off,
+            check_updates: true,
         }
     }
 }

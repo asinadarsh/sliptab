@@ -1,0 +1,23 @@
+Sliptab: privacy and licence
+
+PRIVACY
+Your notes are stored on this computer. Nothing is sent anywhere unless you choose it:
+
+- Sync (optional): only when you sign in with Google in Settings, your notes are sent to the
+  Sliptab server so they reach your other devices.
+- Update checks: every 6 hours Sliptab asks sliptab.com for a newer version, sending only the
+  app version and platform. Turn this off any time in Settings > Check for updates.
+- Link previews: when you save a link, Sliptab reads that page from the linked website itself.
+
+There are no ads, analytics or trackers. Full privacy policy: https://sliptab.com/privacy
+
+UNINSTALLING
+Windows Settings > Apps > Installed apps > Sliptab > Uninstall.
+
+LICENCE
+Sliptab is free software under the GNU General Public License, version 3 only (GPL-3.0-only).
+Source code: https://github.com/asinadarsh/sliptab
+Full licence text: https://www.gnu.org/licenses/gpl-3.0.html
+The Sliptab name and logo are not covered by the licence.
+
+Copyright (C) 2026 Adarsh Kumar Singh
