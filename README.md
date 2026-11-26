@@ -26,6 +26,22 @@ cd desktop && npm ci && npm run tauri build
 Google sign-in is only built in when `scripts/google-env.sh` finds an OAuth client file; without it,
 email sign-in still works.
 
+## Code signing policy
+
+Windows releases will be signed: free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org) (application in progress; until then the
+Windows installer on sliptab.com is unsigned, and the Microsoft Store build is signed by the Store).
+
+- Committers and reviewers: [@asinadarsh](https://github.com/asinadarsh)
+- Approvers: [@asinadarsh](https://github.com/asinadarsh)
+
+Only builds made by this repository's GitHub Actions from its own source are submitted for signing,
+and each release is approved by hand.
+
+Privacy: notes stay on your device unless you sign in to sync. The app asks sliptab.com for updates
+every 6 hours (it sends only the app version and platform). Link previews are fetched from the
+linked site itself. Full policy: [sliptab.com/privacy](https://sliptab.com/privacy).
+
 ## Licence
 
 GPL-3.0-only, see `LICENSE`. The Sliptab name and logo are not covered by the licence.
