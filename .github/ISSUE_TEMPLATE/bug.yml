@@ -1,0 +1,33 @@
+name: Bug report
+description: Something in Sliptab doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Pin a note\n2. Hover its tab\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS and desktop
+      placeholder: Windows 11 / Ubuntu 24.04 GNOME on Wayland / ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Sliptab version
+      description: Settings → About
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or logs
