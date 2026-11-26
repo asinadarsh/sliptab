@@ -1,0 +1,40 @@
+name: msstore
+# The Microsoft Store package (MSIX). Run by hand (Actions → msstore → Run workflow), then upload
+# the artifact in Partner Center. The Store signs it; the in-app updater is compiled out.
+on:
+  workflow_dispatch:
+
+jobs:
+  msix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+        working-directory: desktop
+      - run: npm run tauri build -- --no-bundle
+        working-directory: desktop
+        env:
+          SLIPTAB_STORE: "1"
+          EDGE_GOOGLE_CLIENT_ID: ${{ secrets.EDGE_GOOGLE_CLIENT_ID }}
+          EDGE_GOOGLE_CLIENT_SECRET: ${{ secrets.EDGE_GOOGLE_CLIENT_SECRET }}
+      - name: Pack the MSIX
+        shell: pwsh
+        run: |
+          $v = (Get-Content desktop/src-tauri/tauri.conf.json | ConvertFrom-Json).version + ".0"
+          New-Item -ItemType Directory -Force msix/Assets | Out-Null
+          Copy-Item target/release/edge.exe msix/
+          foreach ($f in "StoreLogo.png","Square150x150Logo.png","Square44x44Logo.png") { Copy-Item "desktop/src-tauri/icons/$f" msix/Assets/ }
+          (Get-Content desktop/msstore/AppxManifest.xml -Raw).Replace("__VERSION__", $v) | Set-Content msix/AppxManifest.xml -Encoding utf8
+          $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          & $makeappx.FullName pack /d msix /p "Sliptab_${v}_x64.msix" /o
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sliptab-msix
+          path: Sliptab_*_x64.msix
+          if-no-files-found: error

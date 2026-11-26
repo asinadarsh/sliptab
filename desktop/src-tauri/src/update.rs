@@ -36,6 +36,10 @@ pub fn check_soon(app: &AppHandle) {
 }
 
 async fn check(app: &AppHandle) {
+    // Microsoft Store builds are updated by the Store (its policy forbids self-updating).
+    if option_env!("SLIPTAB_STORE").is_some() {
+        return;
+    }
     if INSTALLED.load(Ordering::Relaxed) || CHECKING.swap(true, Ordering::Relaxed) {
         return;
     }
