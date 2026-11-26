@@ -1,21 +1,31 @@
-# Edge (codename)
+# Sliptab
 
-Capture a note on your phone in two seconds. It is already on the edge of your laptop screen.
+Notes on the edge of your screen. Pinned notes sit as coloured tabs on the edge of your laptop
+screen: hover a tab to read it, over any app. Sync to your other computers and to the Android app
+is optional.
+
+Website: [sliptab.com](https://sliptab.com) · Windows and Linux · Android coming soon · Mac later
 
 | Path | What |
 |---|---|
-| `core/` | `notes-core`: note model, SQLite + FTS5 store, sync queue. Shared by every app. |
-| `desktop/` | Tauri edge bar (Phase 1, not started) |
-| `mobile/` | Flutter Android app (Phase 2, not started) |
+| `core/` | `notes-core`: the note model, SQLite + FTS5 store and sync queue |
+| `desktop/` | The Tauri app: the edge bar, the panel and the app window |
 
-The hosted sync server is a separate, private repository.
+The sync server and the Android app are separate, closed-source projects.
+
+## Build
+
+Needs Rust (stable), Node 20+ and the Tauri 2 system packages for your OS
+([prerequisites](https://v2.tauri.app/start/prerequisites/)).
 
 ```bash
 cargo test --workspace
-cargo run --example notes -- add "buy milk"
-cargo run --example notes -- search milk
+cd desktop && npm ci && npm run tauri build
 ```
+
+Google sign-in is only built in when `scripts/google-env.sh` finds an OAuth client file; without it,
+email sign-in still works.
 
 ## Licence
 
-GPL-3.0-only, see `LICENSE`. Contributions need the CLA (bot set up on GitHub). The product name is a trademark and is not covered by the licence.
+GPL-3.0-only, see `LICENSE`. The Sliptab name and logo are not covered by the licence.

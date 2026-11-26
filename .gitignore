@@ -2,3 +2,5 @@
 *.db
 *.db-wal
 *.db-shm
+brag-output/
+store/msstore-identity.json
