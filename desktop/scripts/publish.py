@@ -14,6 +14,8 @@ import json
 import os
 import pathlib
 import sys
+import time
+import urllib.error
 import urllib.request
 
 SERVER = "https://edge-sync.forcesync.in"
@@ -24,15 +26,35 @@ UPDATE_PACKAGE = {  # which file the updater installs on each platform
 }
 
 
+PIECE = 16 * 1024 * 1024  # the tunnel breaks one big request ("broken pipe"); send pieces
+
+
+def _send(url: str, data: bytes, expect: tuple) -> None:
+    for attempt in range(4):
+        req = urllib.request.Request(url, data=data, method="PUT",
+                                     headers={"Authorization": f"Bearer {os.environ['EDGE_PUBLISH_TOKEN']}",
+                                              # Cloudflare's bot rules refuse Python's default agent (403)
+                                              "User-Agent": "sliptab-publish/1"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                assert r.status in expect, (url, r.status)
+                return
+        except (OSError, urllib.error.URLError) as e:
+            if attempt == 3:
+                raise
+            print(f"  retry {attempt + 1} after: {e}")
+            time.sleep(3 * (attempt + 1))
+
+
 def put(name: str, data: bytes) -> None:
-    req = urllib.request.Request(
-        f"{SERVER}/v1/admin/releases/{name}",
-        data=data,
-        method="PUT",
-        headers={"Authorization": f"Bearer {os.environ['EDGE_PUBLISH_TOKEN']}"},
-    )
-    with urllib.request.urlopen(req, timeout=300) as r:
-        assert r.status == 204, (name, r.status)
+    url = f"{SERVER}/v1/admin/releases/{name}"
+    if len(data) <= PIECE or name.endswith(".json"):
+        _send(url, data, (204,))
+    else:
+        for off in range(0, len(data), PIECE):
+            chunk = data[off:off + PIECE]
+            last = off + len(chunk) == len(data)
+            _send(f"{url}?offset={off}&total={len(data)}", chunk, (204,) if last else (202,))
     print(f"published {name} ({len(data) // 1024} KB)")
 
 
@@ -68,7 +90,9 @@ def release(version: str, dist: pathlib.Path) -> None:
 def set_min(platform: str, version: str) -> None:
     mins = {}
     for p in ("desktop", "android"):  # keep the other platform's minimum as it is
-        with urllib.request.urlopen(f"{SERVER}/v1/app/status?platform={p}&version=0.0.0", timeout=30) as r:
+        req = urllib.request.Request(f"{SERVER}/v1/app/status?platform={p}&version=0.0.0&nc=1",
+                                     headers={"User-Agent": "sliptab-publish/1"})
+        with urllib.request.urlopen(req, timeout=30) as r:
             if m := json.load(r).get("min"):
                 mins[p] = m
     mins[platform] = version
