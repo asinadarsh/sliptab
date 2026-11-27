@@ -1275,7 +1275,7 @@
           <input type="checkbox" checked={cfg.showBar} onchange={(e) => saveSettings({ showBar: e.currentTarget.checked })} aria-label="Show the bar" />
         </section>
         <section class="setting">
-          <div class="grow"><div>Check for updates</div><div class="sub">Asks sliptab.com every 6 hours, sending only the app version. Off: you update by hand.</div></div>
+          <div class="grow"><div>Check for updates</div><div class="sub">Asks our server every 6 hours. Sends the version and platform, never an ID. Off: you update by hand.</div></div>
           <input type="checkbox" checked={cfg.checkUpdates} onchange={(e) => saveSettings({ checkUpdates: e.currentTarget.checked })} aria-label="Check for updates" />
         </section>
 

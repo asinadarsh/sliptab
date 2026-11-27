@@ -5,11 +5,13 @@ Your notes are stored on this computer. Nothing is sent anywhere unless you choo
 
 - Sync (optional): only when you sign in with Google in Settings, your notes are sent to the
   Sliptab server so they reach your other devices.
-- Update checks: every 6 hours Sliptab asks sliptab.com for a newer version, sending only the
-  app version and platform. Turn this off any time in Settings > Check for updates.
+- Update checks: every 6 hours Sliptab asks our server (edge-sync.forcesync.in) for a newer
+  version. It sends the app version, platform, install type and whether this is the first check
+  today, this week, this month or ever, so we can count copies in use. No ID, nothing about you.
+  Turn this off any time in Settings > Check for updates.
 - Link previews: when you save a link, Sliptab reads that page from the linked website itself.
 
-There are no ads, analytics or trackers. Full privacy policy: https://sliptab.com/privacy
+There are no ads or trackers. Full privacy policy: https://sliptab.com/privacy
 
 UNINSTALLING
 Windows Settings > Apps > Installed apps > Sliptab > Uninstall.
