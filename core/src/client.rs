@@ -190,11 +190,22 @@ impl Client {
     /// Whether this app should update: the latest version, the minimum allowed, and for the phone
     /// where to get it. Needs no sign-in. `platform` is "desktop" or "android".
     pub fn app_status(&self, platform: &str, version: &str) -> Result<AppStatus> {
+        self.app_status_with(platform, version, "")
+    }
+
+    /// `app_status` with extra query parameters: the counting flags (`d=1&w=0…`), or `nc=1`
+    /// for a check the server must not count. Only `[a-z0-9=&]` is passed on.
+    pub fn app_status_with(&self, platform: &str, version: &str, extra: &str) -> Result<AppStatus> {
+        let extra: String = extra
+            .chars()
+            .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '=' || *c == '&')
+            .collect();
         let resp = self
             .agent
             .get(format!(
-                "{}/v1/app/status?platform={platform}&version={version}",
-                self.base
+                "{}/v1/app/status?platform={platform}&version={version}{}{extra}",
+                self.base,
+                if extra.is_empty() { "" } else { "&" }
             ))
             .call();
         read(resp)?.ok_or_else(|| server("empty answer"))
