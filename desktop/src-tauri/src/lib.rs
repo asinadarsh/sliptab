@@ -588,7 +588,10 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            notes_core::client::set_app("desktop", &app.package_info().version.to_string());
+            // Store builds say so, so the server can warn before a minimum strands them (the
+            // Store, not the app, updates them).
+            let kind = if option_env!("SLIPTAB_STORE").is_some() { "desktop-store" } else { "desktop" };
+            notes_core::client::set_app(kind, &app.package_info().version.to_string());
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let store = Store::open(dir.join("notes.db"), device_id(&dir)?)?;
