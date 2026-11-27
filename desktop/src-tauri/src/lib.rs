@@ -525,6 +525,8 @@ fn save_settings(
         current.clone()
     };
     state.place(&window, &saved)?;
+    // The other window (edge panel or app window) loaded its settings at start: tell it.
+    let _ = tauri::Emitter::emit(&window, "settings-changed", &saved);
     Ok(saved)
 }
 

@@ -15,6 +15,7 @@
   import Licenses from "$lib/Licenses.svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { plain } from "$lib/format";
+  import { toggleBox } from "$lib/edit";
   import "@fontsource-variable/figtree";
   import "@fontsource/instrument-serif/400.css";
   import "@fontsource/instrument-serif/400-italic.css";
@@ -436,6 +437,19 @@
       case "closed":
         editing = null;
         break;
+    }
+  }
+
+  /** Ticks a box straight from the tab's preview card, without opening the note. `line` is the
+   *  line in the note body. If that note is open in the editor, the editor's text changes too. */
+  async function tickFromPeek(n: Note, line: number) {
+    if (editing?.id === n.id) await flushSave();
+    const body = toggleBox(editing?.id === n.id ? draft : n.body, line);
+    const updated = await invoke<Note>("note_update", { id: n.id, body });
+    patch(updated);
+    if (editing?.id === n.id) {
+      editing = updated;
+      draft = updated.body;
     }
   }
 
@@ -865,6 +879,8 @@
     if (!standalone) void listen("edge-hotkey", () => edge.hotkey());
     // An edit in the other window (edge panel or app window): reload the lists.
     void listen("notes-changed", () => void refresh());
+    // Theme, layout, side … changed in the other window.
+    void listen<Settings>("settings-changed", (e) => (cfg = e.payload));
     void invoke<SyncStatus>("sync_status").then((st) => (sync = st));
     void listen("saves-updated", () => void refresh());
     void listen<string>("update-ready", (e) => (update = { version: e.payload, ready: true }));
@@ -1093,14 +1109,22 @@
     >
       <div class="peek-t">{hovered.title || "Untitled"}</div>
       <div class="peek-b">
-        {#each plain(hovered.body).split("\n").slice(1) as line}
+        {#each plain(hovered.body).split("\n").slice(1) as line, i}
           {@const item = /^\s*- \[([ xX])\] (.*)$/.exec(line)}
-          {#if item}<div class="ci" class:done={item[1] !== " "}>{item[1] !== " " ? "☑" : "☐"} {item[2]}</div>
+          {#if item}
+            {@const note = hovered}
+            <!-- A box ticks on its own; the rest of the card still opens the note. Markers are
+                 never inside "- [ ] ", so plain() keeps line numbers. -->
+            <button type="button" class="ci" class:done={item[1] !== " "}
+              aria-pressed={item[1] !== " "}
+              onclick={(e) => { e.stopPropagation(); void tickFromPeek(note, i + 1); }}>
+              <span class="ck">{item[1] !== " " ? "☑" : "☐"}</span> {item[2]}
+            </button>
           {:else if line.trim()}<div>{line}</div>
           {:else}<div class="gap"></div>{/if}
         {/each}
       </div>
-      <div class="peek-f">{items.length ? `${items.filter((i) => i.done).length}/${items.length} done · ` : ""}Click to edit</div>
+      <div class="peek-f">{items.length ? `${items.filter((i) => i.done).length}/${items.length} done · Tick a box here · ` : ""}Click to edit</div>
     </div>
   {/if}
 
@@ -1907,16 +1931,36 @@
   .peek-b {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    /* Scrolls with the wheel or trackpad, so a long checklist can be read without opening it. */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
     color: var(--muted);
     font-size: 13px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    -webkit-mask-image: linear-gradient(to bottom, #000 85%, transparent);
-    mask-image: linear-gradient(to bottom, #000 85%, transparent);
   }
   .peek-b .gap {
     height: 6px;
+  }
+  .peek-b .ci {
+    display: block;
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 2px 4px;
+    margin: 0 -4px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .peek-b .ci:hover {
+    background: color-mix(in srgb, var(--c) 12%, transparent);
+  }
+  .peek-b .ci .ck {
+    font-size: 14px;
   }
   .peek-b .ci.done {
     color: var(--faint);

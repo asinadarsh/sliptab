@@ -71,3 +71,40 @@ export function enterInItem(text: string, caret: number): { text: string; caret:
   const next = "\n" + m[1] + "- [ ] ";
   return { text: text.slice(0, caret) + next + text.slice(caret), caret: caret + next.length };
 }
+
+const BULLET = /^(\s*)([-*•]|\d{1,3}[.)]) (?!\[[ xX]\] )/;
+
+/** Enter in a bullet ("- ", "* ") or numbered ("1. ", "1) ") line continues the list with the
+ *  next marker; Enter on an empty item ends the list. Null when the line isn't a list item. */
+export function enterInList(text: string, caret: number): { text: string; caret: number } | null {
+  const start = text.lastIndexOf("\n", caret - 1) + 1;
+  const m = BULLET.exec(text.slice(start));
+  if (!m) return null;
+  const body = start + m[0].length;
+  if (caret < body) return null;
+  let end = text.indexOf("\n", start);
+  if (end < 0) end = text.length;
+  if (!text.slice(body, end).trim()) return { text: text.slice(0, start) + text.slice(body), caret: start };
+  const num = /^(\d+)([.)])$/.exec(m[2]);
+  const marker = num ? `${+num[1] + 1}${num[2]}` : m[2];
+  const next = `\n${m[1]}${marker} `;
+  return { text: text.slice(0, caret) + next + text.slice(caret), caret: caret + next.length };
+}
+
+/** Typed arrows: "->" "<-" "=>" "<->" become → ← ⇒ ↔, and "-->" (the first "-" already part of
+ *  what was typed) is the same → . `typed` is the character just inserted before `caret`.
+ *  Null when nothing changes. Not inside links or code-looking text: only after a space or at
+ *  the line start, and only when the user types it (a paste is left alone). */
+export function arrow(text: string, caret: number, typed: string): { text: string; caret: number } | null {
+  if (typed !== ">" && typed !== "-") return null;
+  const before = text.slice(Math.max(0, caret - 3), caret);
+  const rules: [string, string][] = [["<->", "↔"], ["-->", "→"], ["->", "→"], ["=>", "⇒"], ["<-", "←"]];
+  for (const [from, to] of rules) {
+    if (!before.endsWith(from)) continue;
+    const at = caret - from.length;
+    const prev = text[at - 1];
+    if (prev !== undefined && !/\s/.test(prev)) return null; // a->b inside a word or URL stays
+    return { text: text.slice(0, at) + to + text.slice(caret), caret: at + to.length };
+  }
+  return null;
+}

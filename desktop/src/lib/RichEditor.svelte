@@ -4,7 +4,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { format, type Span } from "./format";
-  import { enterInItem, removeBox, toggleBox, toggleItemLine, toggleWrap } from "./edit";
+  import { arrow, enterInItem, enterInList, removeBox, toggleBox, toggleItemLine, toggleWrap } from "./edit";
 
   let {
     value = $bindable(""),
@@ -185,10 +185,19 @@
     render(text, at);
     oninput?.();
   }
-  function onInput() {
+  function onInput(e?: Event) {
     if (composing) return;
-    const at = caret();
-    const text = read();
+    let at = caret();
+    let text = read();
+    // "->" becomes → as it is typed (a typed character only, never a paste).
+    const ie = e as InputEvent | undefined;
+    if (ie?.inputType === "insertText" && ie.data && at && at.start === at.end) {
+      const a = arrow(text, at.start, ie.data.slice(-1));
+      if (a) {
+        text = a.text;
+        at = { start: a.caret, end: a.caret };
+      }
+    }
     remember(text, at?.start ?? text.length);
     changed(text, at);
   }
@@ -273,7 +282,7 @@
     if (e.key === "Enter" && !e.isComposing) {
       e.preventDefault();
       const at = caret();
-      const r = at && at.start === at.end ? enterInItem(value, at.start) : null;
+      const r = at && at.start === at.end ? (enterInItem(value, at.start) ?? enterInList(value, at.start)) : null;
       if (r) {
         remember(r.text, r.caret, true);
         changed(r.text, { start: r.caret, end: r.caret });
