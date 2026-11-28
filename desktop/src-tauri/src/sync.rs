@@ -312,6 +312,12 @@ pub async fn sync_sign_in_google(app: AppHandle) -> CmdResult<Status> {
         billing,
     })
     .map_err(|e| e.to_string())?;
+    // A different account than this laptop last synced with: start over (see Store::use_account).
+    if let Ok(mut notes) = app.state::<Notes>().0.lock() {
+        if let Err(e) = notes.use_account(&email) {
+            eprintln!("use_account: {e}");
+        }
+    }
     write_private(&st.account_path(), &json).map_err(|e| e.to_string())?;
     let status = Status {
         email: Some(email),

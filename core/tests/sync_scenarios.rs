@@ -398,3 +398,31 @@ fn a_note_pinned_on_the_phone_is_new_on_the_laptop_until_seen() {
     settle(&mut phone, &mut laptop, &mut server);
     assert_eq!(laptop.unseen_pins().unwrap(), [n.id]);
 }
+
+/// A laptop that synced with one account and then signs in as another: the first account's
+/// cursor must not carry over (the new server's sequence numbers are lower, so its notes would
+/// never arrive), and what the laptop holds must reach the new account.
+#[test]
+fn signing_in_as_another_account_syncs_from_the_start() {
+    let (mut phone_a, mut laptop, mut server_a) = devices();
+    for i in 0..5 {
+        phone_a.create(&format!("a{i}")).unwrap();
+    }
+    laptop.use_account("a@example.com").unwrap();
+    settle(&mut phone_a, &mut laptop, &mut server_a);
+    assert_eq!(laptop.cursor().unwrap(), 5);
+
+    let (mut phone_b, mut server_b) = (Store::open_in_memory("phone-b").unwrap(), Server::default());
+    phone_b.create("b-only").unwrap();
+    sync(&mut phone_b, &mut server_b);
+
+    assert!(laptop.use_account("b@example.com").unwrap(), "a different account is noticed");
+    settle(&mut phone_b, &mut laptop, &mut server_b);
+    let bodies: Vec<String> = view(&laptop).into_iter().map(|v| v.0).collect();
+    assert!(bodies.contains(&"b-only".to_string()), "the new account's note arrives: {bodies:?}");
+    assert_eq!(bodies.len(), 6, "and nothing is duplicated: {bodies:?}");
+
+    // The same account signing in again changes nothing.
+    assert!(!laptop.use_account("b@example.com").unwrap());
+    assert_eq!(laptop.cursor().unwrap(), 6);
+}

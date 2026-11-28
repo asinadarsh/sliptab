@@ -765,6 +765,52 @@ impl Store {
             .map(|c| c.unwrap_or(0))
     }
 
+    /// Call whenever this device signs in. A device that synced with one account and now signs in
+    /// as another must start over: the old account's cursor is meaningless to the new server (its
+    /// sequence numbers are lower, so its notes would never arrive) and the notes here count as
+    /// never synced, so they are queued for the new account. Returns true when it started over.
+    /// The same account again changes nothing; a device from before this existed (no account
+    /// remembered) is taken to be the same account, since there is no way to know.
+    pub fn use_account(&mut self, account: &str) -> rusqlite::Result<bool> {
+        // An email, lower case, reduced to a number: the database never holds the address itself.
+        let id = {
+            use sha2::{Digest, Sha256};
+            let d = Sha256::digest(format!("sliptab-account:{}", account.trim().to_lowercase()));
+            i64::from_le_bytes(d[..8].try_into().expect("8 bytes"))
+        };
+        let known: Option<i64> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'account'", [], |r| r.get(0))
+            .optional()?;
+        let set = "INSERT INTO meta (key, value) VALUES ('account', ?1) \
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value";
+        match known {
+            Some(k) if k == id => return Ok(false),
+            None => {
+                self.conn.execute(set, [id])?;
+                return Ok(false);
+            }
+            Some(_) => {}
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM meta WHERE key = 'cursor'", [])?;
+        tx.execute("UPDATE notes SET synced_version = NULL, synced_hash = NULL, synced_meta = NULL", [])?;
+        tx.execute("DELETE FROM media_uploaded", [])?;
+        let now = now_ms();
+        let ids: Vec<String> = tx
+            .prepare("SELECT id FROM notes")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for i in ids {
+            if let Ok(i) = i.parse() {
+                queue(&tx, i, now)?;
+            }
+        }
+        tx.execute(set, [id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// IDs of notes changed since the last successful sync, oldest change first.
     pub fn pending_sync(&self) -> rusqlite::Result<Vec<Uuid>> {
         let mut stmt = self
