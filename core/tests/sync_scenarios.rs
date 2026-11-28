@@ -426,3 +426,20 @@ fn signing_in_as_another_account_syncs_from_the_start() {
     assert!(!laptop.use_account("b@example.com").unwrap());
     assert_eq!(laptop.cursor().unwrap(), 6);
 }
+
+/// Deleting the account and signing up again gives a server that counts from zero again.
+#[test]
+fn after_deleting_the_account_a_new_one_gets_the_notes_again() {
+    let (mut phone, mut laptop, mut server) = devices();
+    for i in 0..4 {
+        phone.create(&format!("n{i}")).unwrap();
+    }
+    settle(&mut phone, &mut laptop, &mut server);
+    assert_eq!(laptop.cursor().unwrap(), 4);
+
+    let mut fresh = Server::default(); // the account was deleted; the new one is empty
+    laptop.start_over().unwrap();
+    sync(&mut laptop, &mut fresh);
+    assert_eq!(fresh.notes.len(), 4, "the laptop's notes reach the new account");
+    assert_eq!(laptop.cursor().unwrap(), 4);
+}

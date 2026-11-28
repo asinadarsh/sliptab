@@ -366,6 +366,12 @@ pub async fn sync_delete_account(app: AppHandle) -> CmdResult<Status> {
             .map_err(|e| e.to_string())
     })
     .await?;
+    // The account is gone from the server; a new one starts counting from zero (Store::start_over).
+    if let Ok(mut notes) = app.state::<Notes>().0.lock() {
+        if let Err(e) = notes.start_over() {
+            eprintln!("start_over: {e}");
+        }
+    }
     let _ = std::fs::remove_file(st.account_path());
     *st.status.lock().map_err(|e| e.to_string())? = Status::default();
     Ok(Status::default())

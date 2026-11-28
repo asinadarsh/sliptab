@@ -792,6 +792,15 @@ impl Store {
             }
             Some(_) => {}
         }
+        self.start_over()?;
+        self.conn.execute(set, [id])?;
+        Ok(true)
+    }
+
+    /// Forget everything this device knows about the server: the cursor, each note's synced
+    /// state and which files were uploaded, and queue every note again. Used when the account
+    /// changes or is deleted, so the next sync treats this device as a new one holding these notes.
+    pub fn start_over(&mut self) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM meta WHERE key = 'cursor'", [])?;
         tx.execute("UPDATE notes SET synced_version = NULL, synced_hash = NULL, synced_meta = NULL", [])?;
@@ -806,9 +815,7 @@ impl Store {
                 queue(&tx, i, now)?;
             }
         }
-        tx.execute(set, [id])?;
-        tx.commit()?;
-        Ok(true)
+        tx.commit()
     }
 
     /// IDs of notes changed since the last successful sync, oldest change first.
