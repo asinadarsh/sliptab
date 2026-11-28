@@ -270,6 +270,33 @@ fn place_windows(
         SetWindowRgn(hwnd, region, 1);
     }
     window.show()?;
+    keep_on_top(window)?;
+    Ok(())
+}
+
+/// Windows: put the bar back above every normal window if anything has pushed it down. The flag
+/// set at start-up is not permanent: Windows drops it, or another window takes the top spot, and
+/// the bar then hides behind whatever is maximized (seen with Chrome and a terminal). Cheap when
+/// the bar is already on top, so it runs after every placement and once a second.
+#[cfg(windows)]
+pub fn keep_on_top(window: &WebviewWindow) -> tauri::Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindow, GetWindowLongPtrW, IsWindowVisible, SetWindowPos, GWL_EXSTYLE, GW_HWNDPREV,
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOPMOST,
+    };
+    let hwnd = window.hwnd()?.0 as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: hwnd is this app's live top-level window; these calls only read its state and ask
+    // for a z-order change without moving, resizing or activating it.
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            return Ok(());
+        }
+        let topmost = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0;
+        let nothing_above = GetWindow(hwnd, GW_HWNDPREV).is_null();
+        if !(topmost && nothing_above) {
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
     Ok(())
 }
 

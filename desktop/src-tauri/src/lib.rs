@@ -609,6 +609,18 @@ pub fn run() {
             let probe_settings = loaded.clone();
             app.manage(AppSettings { dir: dir.clone(), current: Mutex::new(loaded) });
             edge::forward_pointer_crossings(&window)?;
+            #[cfg(windows)]
+            {
+                // Safety net for the bar losing its place above other windows (see edge::keep_on_top).
+                let w = window.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let w2 = w.clone();
+                    let _ = w.run_on_main_thread(move || {
+                        let _ = edge::keep_on_top(&w2);
+                    });
+                });
+            }
             if probe_settings.show_bar || edge::backend() == "x11" {
                 window.show()?; // X11 hides the bar with an empty input shape instead of unmapping
             }
